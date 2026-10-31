@@ -1,15 +1,19 @@
-# Chronos v6.0 — Organizador de Fotos por Data
+# Chronos Arkhe v6.0 — Organizador de Fotos por Data
 
-Aplicação GTK3 para organizar automaticamente fotos por data de captura (EXIF). Suporta múltiplos formatos de imagem e RAWs, com integração nativa no Nautilus File Manager.
+Aplicação GTK3 para organizar automaticamente fotos por data de captura (EXIF). Suporta múltiplos formatos de imagem e RAWs, com integração nativa no Nautilus File Manager. Integra a suite fotográfica **Chronos** (*Arkhe*, *Nomos*, *Sfragis*, *Gnosis*).
 
 ## 🚀 Novidades v6.0
 
-- **Aplicação GTK3 completa** — Interface melhorada com navegador de ficheiros integrado
+- **Aplicação GTK3 completa** — Interface com navegador de ficheiros integrado
+- **Arquitetura de classes** — `ChronosArkheApp(Gtk.Window)`, padrão unificado da suite Chronos
+- **Processamento assíncrono** — Worker em thread separada; a UI nunca bloqueia
+- **Logging em tempo real** — Painel de log mostra cada passo da operação
+- **Progress bar** — Acompanhamento visual do progresso
+- **Cancelamento seguro** — Interrompe a operação a meio sem corromper ficheiros
 - **Botão Mover/Copiar** — Toggle entre copiar ficheiros (padrão) ou movê-los
 - **Preview de imagens** — Visualiza miniaturas das fotos selecionadas
-- **Histórico persistente** — Eventos e locais são armazenados e reutilizados
+- **Configuração centralizada** — `~/.config/chronos/arkhe.json` (padrão XDG da suite)
 - **Integração Nautilus** — Script disponível no menu de contexto (clica direito)
-- **Compatibilidade total** — Modo Nautilus mantido para uso com scripts
 
 ## 📦 Instalação
 
@@ -30,18 +34,23 @@ sudo apt install libimage-exiftool-perl
 
 ```bash
 cd Chronos-Arkhe
-./install.sh
+scripts/install.sh
 ```
 
-O instalador:
-- Copia o binário para `/usr/local/bin/chronos-arkhe`
-- Registra a aplicação no menu de aplicações
-- Configura script para Nautilus em `~/.local/share/nautilus/scripts/`
+O instalador (sem necessidade de root):
+- Copia o binário para `~/.local/bin/chronos-arkhe`
+- Regista a aplicação no menu de aplicações (`~/.local/share/applications/`)
+- Instala o ícone em `~/.local/share/icons/hicolor/`
+- Cria ligação para o Nautilus em `~/.local/share/nautilus/scripts/Chronos Arkhe`
+
+> 💡 **Alternativa rápida**: `scripts/run.sh` executa diretamente do código-fonte, com verificação de dependências.
+>
+> 📦 **Pacote Debian**: `scripts/build-deb.sh` gera `build/chronos-arkhe_6.0.0_all.deb` para instalação ao nível do sistema.
 
 ### Desinstalar
 
 ```bash
-./uninstall.sh
+scripts/uninstall.sh
 ```
 
 ## 🎯 Como Usar
@@ -65,8 +74,10 @@ A interface permite:
 ### Modo Nautilus (Clica Direito)
 
 1. Seleciona fotos no Nautilus
-2. Clica direito → **Scripts** → **Organizar Fotos**
+2. Clica direito → **Scripts** → **Chronos Arkhe**
 3. Configura opções no diálogo (igual ao modo aplicação)
+
+> 💡 Se o script não aparecer, ativa-o com `scripts/enable-nautilus-script.sh` e reinicia o Nautilus (`killall nautilus`).
 
 ### Modo Linha de Comando
 
@@ -144,7 +155,7 @@ Exemplo: `foto.jpg` + `foto.jpg.xmp` são movidos juntos.
 Histórico de eventos e locais é armazenado em:
 
 ```
-~/.config/organizar_fotos/historico.json
+~/.config/chronos/arkhe.json
 ```
 
 Formato:
@@ -203,14 +214,14 @@ Um aviso é mostrado se múltiplas fotos caem num único dia. Soluções:
 
 ### Script Nautilus não aparece
 
-Garantir que o ficheiro foi instalado corretamente:
+Garantir que a ligação foi criada corretamente:
 
 ```bash
 ls -la ~/.local/share/nautilus/scripts/
 ```
 
 Se não existir:
-- Reinstala: `./install.sh`
+- Ativa: `scripts/enable-nautilus-script.sh` (ou reinstala: `scripts/install.sh`)
 - Reinicia Nautilus: `killall nautilus ; nautilus &`
 
 ## 📝 Exemplos
@@ -225,7 +236,7 @@ chronos-arkhe
 # Via Nautilus
 # 1. Abre pasta com fotos
 # 2. Seleciona ficheiros
-# 3. Clica direito → Scripts → Organizar Fotos
+# 3. Clica direito → Scripts → Chronos Arkhe
 ```
 
 ### Mover (em vez de copiar)
@@ -244,7 +255,7 @@ chronos-arkhe
 # Primeira vez
 chronos-arkhe ~/Férias2024/*.jpg
 # Define Evento="Férias 2024" e Local="Algarve"
-# Fica armazenado em ~/.config/organizar_fotos/historico.json
+# Fica armazenado em ~/.config/chronos/arkhe.json
 
 # Próxima vez
 chronos-arkhe ~/Férias2024/dia2/*.jpg

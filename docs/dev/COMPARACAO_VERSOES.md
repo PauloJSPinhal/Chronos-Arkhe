@@ -199,7 +199,7 @@ class ChronosArkheApp:
 
 **Passo 1**: Instalar v6.0
 ```bash
-./install.sh
+scripts/install.sh
 ```
 
 **Passo 2** (Opcional): Migrar histórico

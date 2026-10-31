@@ -1,17 +1,20 @@
-# 🚀 Quick Start — Chronos v6.0
+# 🚀 Quick Start — Chronos Arkhe v6.0
 
 ## Instalação Rápida
 
 ```bash
 cd Chronos-Arkhe
-./install.sh
+scripts/install.sh
 ```
 
 **O que é instalado:**
-- ✅ Binário: `/usr/local/bin/chronos-arkhe`
-- ✅ Aplicação: Menu de aplicações (procura "Chronos")
+- ✅ Binário: `~/.local/bin/chronos-arkhe` (sem root)
+- ✅ Aplicação: Menu de aplicações (procura "Chronos Arkhe")
 - ✅ Nautilus: Script de contexto (clica direito)
-- ✅ Config: `~/.config/organizar_fotos/` (histórico JSON)
+- ✅ Ícone: `~/.local/share/icons/hicolor/`
+- ✅ Config: `~/.config/chronos/arkhe.json` (histórico JSON)
+
+> 💡 **Alternativa**: executa sem instalar com `scripts/run.sh`
 
 ## 🎯 Como Usar
 
@@ -20,9 +23,9 @@ cd Chronos-Arkhe
 ```bash
 chronos-arkhe
 # OU
-# Procura "Chronos" no menu de aplicações
+# Procura "Chronos Arkhe" no menu de aplicações
 # OU
-# Nautilus: Clica direito → Scripts → Organizar Fotos
+# Nautilus: Clica direito → Scripts → Chronos Arkhe
 ```
 
 ### 2️⃣ Selecionar Fotos
@@ -97,7 +100,7 @@ Mostra:
 ### Limpeza Manual do Histórico
 
 ```bash
-nano ~/.config/organizar_fotos/historico.json
+nano ~/.config/chronos/arkhe.json
 ```
 
 Formato:
@@ -115,14 +118,15 @@ Formato:
 |----------|---------|
 | "Nenhuma foto selecionada" | Seleciona pelo menos 1 ficheiro na navegação esquerda |
 | "Todas as fotos mesma data" | EXIF pode estar vazio. Tenta: `pip install exifread` |
-| Nautilus script não aparece | Reinstala: `./install.sh` e reinicia Nautilus |
+| Nautilus script não aparece | Ativa com `scripts/enable-nautilus-script.sh` e reinicia o Nautilus |
 | "Permissão negada" | Verifica permissões: `chmod 755 ~/.local/share/nautilus/scripts/*` |
+| Quero desinstalar | `scripts/uninstall.sh` |
 
 ## 📞 Suporte
 
 - 📖 Documentação: [USAGE.md](./USAGE.md)
 - 🐛 Debug: `chronos-arkhe --debug`
-- 📝 Config: `~/.config/organizar_fotos/historico.json`
+- 📝 Config: `~/.config/chronos/arkhe.json`
 
 ---
 

@@ -1,6 +1,6 @@
 # Changelog
 
-Todos os lançamentos notáveis do **Chronos-Photo-Organizer** são documentados neste ficheiro.
+Todos os lançamentos notáveis do **Chronos Arkhe** (suite **Chronos**) são documentados neste ficheiro.
 
 O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 e o projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR/).
@@ -10,41 +10,46 @@ e o projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 ## [Unreleased]
 
 ### Planeado
-- Integração com `exifread` para extração fiável de datas em ficheiros RAW ✓
-- Corrigir filtro `file://` em URIs do Nautilus ✓
-- Escrita atómica do `historico.json` via `os.replace` ✓
+- Diálogo por data com pedido de Evento/Local em contexto de thread (atualmente placeholder)
 - Diálogo de gestão de histórico (apagar entradas obsoletas)
 - Thumbnail assíncrono para não bloquear a UI
+- Suite de testes automatizados
 
 ---
 
-## [6.0] — 2026-10-31
+## [6.0.0] — 2026-10-31
 
 ### Adicionado
-- **Aplicação GTK3 completa** — Interface melhorada com navegador de ficheiros integrado
-- **Botão Toggle Mover/Copiar** — Escolhe se pretende copiar (padrão) ou mover ficheiros
-- **Preview de imagens** — Visualiza miniaturas das fotos selecionadas
-- **Integração Nautilus melhorada** — Script de contexto instalado via `install.sh`
-- **Ficheiro .desktop** — Aplicação registrada no menu de aplicações GNOME/KDE
-- **Scripts de instalação/desinstalação** — Verificação de dependências Python
-- **Documentação completa** — `USAGE.md` com exemplos e troubleshooting
-- **Modo debug melhorado** — Flag `--debug` com diagnóstico EXIF detalhado
+- **Aplicação GTK3 completa** — Interface com navegador de ficheiros integrado
+- **Arquitetura de classes** — `ChronosArkheApp(Gtk.Window)`, alinhada com o padrão Chronos-Nomos
+- **Thread worker** — Processamento em background (`_worker()`), UI nunca bloqueia
+- **Logging em tempo real** — Painel de log com atualização thread-safe via `GLib.idle_add`
+- **Progress bar** — Acompanhamento visual do progresso da operação
+- **Cancelamento seguro** — Flag `abort` verificada no ciclo do worker
+- **Botão Toggle Mover/Copiar** — Copiar (padrão) ou mover ficheiros
+- **Preview de imagens** — Miniaturas das fotos selecionadas
+- **Configuração centralizada XDG** — `~/.config/chronos/arkhe.json`
+- **Estrutura de projeto padronizada** — Alinhada com Chronos-Nomos:
+  - `scripts/install.sh` / `scripts/uninstall.sh` — instalação local em `~/.local` (sem root)
+  - `scripts/run.sh` — execução a partir do código-fonte com verificação de dependências
+  - `scripts/build-deb.sh` — geração de pacote `.deb`
+  - `scripts/enable-nautilus-script.sh` / `scripts/disable-nautilus-script.sh` — gestão da integração Nautilus
+  - `debian/control`, `debian/postinst`, `debian/prerm` — empacotamento Debian
+- **Ficheiro .desktop** — Aplicação registada no menu de aplicações GNOME/KDE
+- **Documentação completa** — `README.md`, `USAGE.md`, `QUICK_START.md` e `docs/dev/`
 
 ### Alterado
-- `main()` refatorizada para aceitar lista de ficheiros pré-fornecida
-- Nova função `janela_principal_simples()` com suporte a toggle Mover/Copiar
-- Função auxiliar `processar_ficheiro()` para abstração copy/move
-- Mensagem final dinâmica que reflete modo (copiado vs movido)
-- Compatibilidade mantida com modo Nautilus (argumentos CLI)
-
-### Corrigido
-- Nenhum bug de v5.5 reportado
+- Migração de funções soltas para classe `ChronosArkheApp(Gtk.Window)` com métodos `_` privados
+- Histórico movido de `~/.config/organizar_fotos/historico.json` para `~/.config/chronos/arkhe.json`
+- Instalação passa de `/usr/local/bin` (com root) para `~/.local/bin` (sem root)
+- Script Nautilus passa a ser uma ligação simbólica "Chronos Arkhe" (antes "Organizar Fotos")
+- `README.md` reformatado no padrão da suite Chronos
 
 ### Nota de Compatibilidade
 - ✅ Modo Nautilus mantido (clica direito em ficheiros)
 - ✅ Modo CLI mantido (`chronos-arkhe *.jpg`)
-- ✅ Flag --debug mantida para diagnóstico
-- ✅ Histórico JSON mantido (compatível com v5.x)
+- ⚠️ Config antiga em `~/.config/organizar_fotos/` não é migrada automaticamente —
+  copia manualmente: `cp ~/.config/organizar_fotos/historico.json ~/.config/chronos/arkhe.json`
 
 ---
 

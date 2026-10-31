@@ -115,7 +115,7 @@ $ chronos-arkhe
 ```bash
 $ nautilus
 (clica direito em ficheiros)
-→ Scripts → Organizar Fotos
+→ Scripts → Chronos Arkhe
 ✅ Funciona como v5.5
 ```
 
@@ -173,12 +173,12 @@ $ chronos-arkhe --debug ~/Fotos/*.jpg
 
 ### Teste da Instalação
 ```bash
-✅ ./install.sh funciona com verificação de dependências
+✅ scripts/install.sh funciona com verificação de dependências
 ✅ Ficheiros instalados nos locais corretos
 ✅ Ícone registado no menu de aplicações
 ✅ Script Nautilus pronto para usar
 
-✅ ./uninstall.sh remove sem deixar artefatos
+✅ scripts/uninstall.sh remove sem deixar artefatos
 ```
 
 ### Primeiro Uso
@@ -194,7 +194,7 @@ $ chronos-arkhe --debug ~/Fotos/*.jpg
 ## Pontos de Destaque
 
 ### 🎯 Interface Moderna
-- HeaderBar com branding "Chronos — Organizar Fotos por Data"
+- HeaderBar com branding "Chronos Arkhe — Organizar Fotos por Data"
 - Layout responsivo com HSplit
 - Navegador profissional integrado
 - Botões com estilos (suggested-action para OK)
@@ -244,7 +244,7 @@ Todos os requisitos foram cumpridos:
 **Próximos passos para o utilizador:**
 ```bash
 cd Chronos-Arkhe
-./install.sh
+scripts/install.sh
 chronos-arkhe
 ```
 

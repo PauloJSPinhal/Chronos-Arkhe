@@ -53,26 +53,25 @@ Participa de forma respeitosa e construtiva. Comentários pessoais, ataques ou d
 3. **Instalar dependências de desenvolvimento**:
 
    ```bash
-   pip install -r requirements-dev.txt
+   pip install Pillow exifread pytest pytest-cov flake8 black
    ```
 
-   Ou manualmente:
-
-   ```bash
-   pip install Pillow pygobject exifread pytest pytest-cov flake8 black
-   ```
-
-   > ⚠️ O `pygobject` requer headers de sistema. Em Debian/Ubuntu:
-   > `sudo apt install libglib2.0-dev libgtk-3-dev libgirepository1.0-dev`
+   > ⚠️ O `pygobject` é instalado via sistema, não via pip. Em Debian/Ubuntu:
+   > `sudo apt install python3-gi gir1.2-gtk-3.0`
 
 4. **Instalar como Nautilus Script (opcional, para testes reais)**:
 
    ```bash
-   ln -sf "$(pwd)/chronos.py" ~/.local/share/nautilus/scripts/Chronos.py
-   chmod +x chronos.py
+   scripts/enable-nautilus-script.sh
    ```
 
-5. **Verificar instalação**:
+5. **Executar a partir do código-fonte**:
+
+   ```bash
+   scripts/run.sh
+   ```
+
+6. **Verificar instalação**:
 
    ```bash
    python3 -c "import gi; gi.require_version('Gtk', '3.0'); from gi.repository import Gtk; print('GTK OK')"
@@ -84,26 +83,32 @@ Participa de forma respeitosa e construtiva. Comentários pessoais, ataques ou d
 ## 📁 Estrutura do projeto
 
 ```
-Chronos-Photo-Organizer/
-├── chronos.py                 # Script principal (GTK3 + lógica)
-├── README.md
+Chronos-Arkhe/
+├── bin/
+│   └── chronos-arkhe            # Aplicação principal (GTK3 + lógica)
+├── data/
+│   ├── chronos-arkhe.desktop    # Entrada XDG Desktop
+│   └── icons/                   # Ícones hicolor
+├── debian/                      # Empacotamento Debian
+│   ├── control
+│   ├── postinst
+│   └── prerm
+├── docs/                        # Documentação e capturas de ecrã
+│   └── dev/                     # Documentação técnica de desenvolvimento
+├── scripts/                     # Instalação e utilitários
+│   ├── install.sh
+│   ├── uninstall.sh
+│   ├── run.sh                   # Executor de desenvolvimento
+│   ├── build-deb.sh
+│   ├── enable-nautilus-script.sh
+│   ├── disable-nautilus-script.sh
+│   └── organizar-fotos-nautilus
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
+├── QUICK_START.md
+├── USAGE.md
 ├── LICENSE
-├── .gitignore
-├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug-report.md
-│       ├── feature-request.md
-│       └── raw-not-supported.md
-├── docs/                      # Screenshots e documentação extra
-│   ├── dialogo-principal.png
-│   ├── dialogo-por-data.png
-│   └── resultado-final.png
-└── tests/                     # (planeado) Testes unitários
-    ├── test_sanitize.py
-    ├── test_exif.py
-    └── test_sidecars.py
+└── README.md
 ```
 
 ---
@@ -121,10 +126,10 @@ Chronos-Photo-Organizer/
 
 | Item | Convenção | Exemplo |
 |---|---|---|
-| Nomes de funções | `snake_case` em PT | `obter_data_exif()` |
+| Nomes de funções/métodos | `snake_case` em PT | `_obter_data_exif()` |
 | Nomes de variáveis | `snake_case` em PT | `historico_eventos` |
-| Constantes | `UPPER_SNAKE` em PT ou EN | `IMAGE_EXTS`, `HISTORY_FILE` |
-| Comentários de secção | Box com `# ───` | ver `chronos.py` |
+| Constantes | `UPPER_SNAKE` em PT ou EN | `IMAGE_EXTS`, `CONFIG_FILE` |
+| Métodos internos | Prefixo `_` | `_worker()`, `_log()` |
 | Docstrings | Triple-quote duplo | `"""..."""` |
 | Mensagens de UI | PT-PT natural | "Pedir Evento e Local para cada data" |
 
@@ -132,24 +137,23 @@ Chronos-Photo-Organizer/
 
 ```bash
 # Formatar
-black chronos.py
+black bin/chronos-arkhe
 
 # Lint
-flake8 chronos.py --max-line-length=100
+flake8 bin/chronos-arkhe --max-line-length=100
 
 # Tipo (se adicionares typing)
-mypy chronos.py --ignore-missing-imports
+mypy bin/chronos-arkhe --ignore-missing-imports
 ```
 
-### Comentários de secção
+### Arquitetura
 
-O script usa separadores visuais para delimitar secções. Manter o padrão:
+A v6.0 segue o padrão da suite Chronos (ver Chronos-Nomos):
 
-```python
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. CONFIGURAÇÃO & HISTÓRICO
-# ─────────────────────────────────────────────────────────────────────────────
-```
+- **Classe principal**: `ChronosArkheApp(Gtk.Window)` encapsula toda a UI e estado
+- **Thread worker**: `_worker()` executa o processamento em background
+- **Atualizações de UI**: sempre via `GLib.idle_add()` a partir da thread
+- **Configuração**: `~/.config/chronos/arkhe.json` (padrão XDG da suite)
 
 ---
 
@@ -173,8 +177,14 @@ O projeto ainda **não tem suite de testes**. Esta é uma área prioritária par
 
 ```python
 # tests/test_sanitize.py
+import importlib.util
 import pytest
-from chronos import sanitize
+
+spec = importlib.util.spec_from_file_location("chronos_arkhe", "bin/chronos-arkhe")
+chronos_arkhe = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(chronos_arkhe)
+
+sanitize = chronos_arkhe.sanitize
 
 @pytest.mark.parametrize("input,expected", [
     ("Fim de semana", "Fim-de-semana"),
@@ -183,16 +193,17 @@ from chronos import sanitize
     ("A -- B", "A-B"),
     ("-Natal-", "Natal"),
     ("", "Indefinido"),
-    (None, None),
 ])
 def test_sanitize(input, expected):
     assert sanitize(input) == expected
 ```
 
+> Nota: o binário não tem extensão `.py`, por isso os testes importam-no via `importlib.util.spec_from_file_location`.
+
 ### Executar testes
 
 ```bash
-pytest tests/ -v --cov=chronos
+pytest tests/ -v
 ```
 
 ---
@@ -283,7 +294,7 @@ Usar o template [bug-report.md](./.github/ISSUE_TEMPLATE/bug-report.md).
 
 Informações essenciais:
 
-- Versão do Chronos (`grep VERSION chronos.py` ou ver `CHANGELOG.md`)
+- Versão do Chronos Arkhe (ver `CHANGELOG.md` ou o cabeçalho de `bin/chronos-arkhe`)
 - Distribuição Linux e versão do GNOME
 - Versão do Python e do PyGObject
 - Formato dos ficheiros envolvidos (JPEG, CR3, NEF, ...)
@@ -293,7 +304,7 @@ Informações essenciais:
 Executar em modo debug para recolher informação útil:
 
 ```bash
-GTK_DEBUG=all PYTHONPATH=. python3 chronos.py foto.jpg 2>&1 | tee debug.log
+GTK_DEBUG=all scripts/run.sh foto.jpg 2>&1 | tee debug.log
 ```
 
 ---
