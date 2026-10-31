@@ -1,0 +1,6 @@
+#!/bin/bash
+# Script para integração com o Nautilus File Manager
+# Coloca em ~/.local/share/nautilus/scripts/
+# Permite organizar fotos selecionadas no Nautilus
+
+exec chronos-arkhe "$@"

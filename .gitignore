@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Project specific
+build/
+test_photos/
+*.backup

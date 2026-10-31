@@ -1,0 +1,560 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Chronos Arkhe — Organizador de Fotos por Data
+Padrão: AAAAMMDD_Evento-Local
+Compatível: Debian 13 / GNOME / GTK3 / Pillow / PyGObject
+v6.0 — Refatorizado para padrão Chronos (classe Window + config centralizado)
+"""
+
+import os
+import sys
+import json
+import shutil
+import pathlib
+import datetime
+import urllib.parse
+import re
+import io
+import threading
+
+try:
+    from PIL import Image
+except ImportError:
+    print("❌ Pillow não instalado. Execute: pip install Pillow", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gtk, Gdk, GObject, GLib, Pango, GdkPixbuf
+except ImportError:
+    print("❌ PyGObject não instalado. Execute: sudo apt install python3-gi", file=sys.stderr)
+    sys.exit(1)
+
+# Imports opcionais
+try:
+    import exifread
+    HAS_EXIFREAD = True
+except ImportError:
+    HAS_EXIFREAD = False
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURAÇÃO CENTRALIZADA
+# ─────────────────────────────────────────────────────────────────────────────
+CONFIG_DIR = pathlib.Path.home() / ".config" / "chronos"
+CONFIG_FILE = CONFIG_DIR / "arkhe.json"
+
+IMAGE_EXTS = {
+    '.jpg', '.jpeg', '.png', '.tiff', '.tif', '.webp', '.bmp', '.gif',
+    '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef', '.srw',
+    '.raf', '.3fr', '.iiq', '.kdc', '.mos', '.mef', '.nrw', '.ptx', '.r3d',
+    '.rwl', '.sr2', '.srf', '.gpr', '.erf'
+}
+SIDECAR_EXTS = ('.xmp', '.pp3', '.dop')
+EXIF_TAGS_PRIORIDADE = (36867, 36868)
+
+def load_config():
+    """Carrega configuração do JSON ou padrões."""
+    default_cfg = {
+        "ultima_pasta": str(pathlib.Path.home() / "Imagens"),
+        "eventos": [],
+        "locais": [],
+        "ask_mode": True,
+        "usar_move": False,
+    }
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                default_cfg.update(data)
+        except Exception as e:
+            print(f"⚠️ Erro ao ler config: {e}", file=sys.stderr)
+    return default_cfg
+
+def save_config(cfg):
+    """Grava configuração com escrita atómica."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = CONFIG_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        tmp.replace(CONFIG_FILE)
+    except Exception as e:
+        print(f"⚠️ Erro ao gravar config: {e}", file=sys.stderr)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILITÁRIOS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def sanitize(text):
+    """Normaliza texto para pasta."""
+    if text is None:
+        return None
+    t = text.strip()
+    t = t.replace(' ', '-')
+    t = t.replace('_', '-')
+    t = re.sub(r'[^\w-]', '', t, flags=re.UNICODE)
+    t = re.sub(r'-+', '-', t)
+    return t.strip('-') or "Indefinido"
+
+def image_to_pixbuf(filepath, max_size=280):
+    """Gera thumbnail GdkPixbuf."""
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext not in IMAGE_EXTS:
+        return None
+    try:
+        with Image.open(filepath) as img:
+            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            buffer = io.BytesIO()
+            img.save(buffer, format='PNG')
+            buffer.seek(0)
+            loader = GdkPixbuf.PixbufLoader.new()
+            loader.write(buffer.getvalue())
+            loader.close()
+            return loader.get_pixbuf()
+    except Exception:
+        return None
+
+def _parse_exif_date(dt_str):
+    """Interpreta string EXIF em vários formatos."""
+    if not dt_str:
+        return None
+    if isinstance(dt_str, bytes):
+        s = dt_str.decode('utf-8', errors='ignore')
+    else:
+        s = str(dt_str)
+    s = s.strip().strip('\x00').strip()
+    if not s:
+        return None
+
+    formatos = [
+        "%Y:%m:%d %H:%M:%S", "%Y:%m:%d %H:%M", "%Y:%m:%d",
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S", "%Y/%m/%d",
+    ]
+    for fmt in formatos:
+        try:
+            expected_len = len(fmt.replace('%Y', '2024').replace('%m', '01').replace('%d', '15')
+                                        .replace('%H', '14').replace('%M', '30').replace('%S', '00'))
+            return datetime.datetime.strptime(s[:expected_len], fmt)
+        except ValueError:
+            continue
+
+    for fmt in ("%Y:%m:%d", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(s[:10], fmt)
+        except ValueError:
+            continue
+    return None
+
+def obter_data_exif(caminho):
+    """Extrai data EXIF com fallbacks."""
+    try:
+        with Image.open(caminho) as img:
+            exif = img.getexif() if hasattr(img, 'getexif') else None
+            if exif:
+                for tag_id in EXIF_TAGS_PRIORIDADE:
+                    val = exif.get(tag_id)
+                    if val:
+                        dt = _parse_exif_date(val)
+                        if dt:
+                            return dt, False, 'pillow'
+    except Exception:
+        pass
+
+    if HAS_EXIFREAD:
+        try:
+            with open(caminho, 'rb') as f:
+                tags = exifread.process_file(f, details=False, stop_tag='EXIF DateTimeOriginal')
+            for key in ('EXIF DateTimeOriginal', 'EXIF DateTimeDigitized'):
+                val = tags.get(key)
+                if val:
+                    dt = _parse_exif_date(str(val))
+                    if dt:
+                        return dt, False, 'exifread'
+        except Exception:
+            pass
+
+    return datetime.datetime.fromtimestamp(os.path.getmtime(caminho)), True, 'mtime'
+
+def get_sidecars(main_file):
+    """Retorna sidecars associados."""
+    src_dir = os.path.dirname(main_file)
+    stem = os.path.splitext(os.path.basename(main_file))[0]
+    ext = os.path.splitext(os.path.basename(main_file))[1]
+    candidates = set()
+    for sc_ext in SIDECAR_EXTS:
+        candidates.add(os.path.join(src_dir, f"{stem}{sc_ext}"))
+        candidates.add(os.path.join(src_dir, f"{stem}{ext}{sc_ext}"))
+    return [c for c in candidates if os.path.isfile(c)]
+
+def _normalizar_uri(u):
+    """Converte URI file:// ou path relativo."""
+    if u.startswith("file://"):
+        return urllib.parse.unquote(u[7:])
+    return os.path.abspath(u)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APLICAÇÃO PRINCIPAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ChronosArkheApp(Gtk.Window):
+    def __init__(self, initial_files=None):
+        super().__init__(title="Chronos Arkhe — Organizar Fotos")
+        self.set_default_size(900, 650)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.connect("destroy", Gtk.main_quit)
+
+        self.cfg = load_config()
+        self.ficheiros = []
+        self.datas = {}
+        self.info = {}
+        self.state = "IDLE"  # IDLE, SCANNING, PROCESSING
+        self.abort = False
+        self.processed = 0
+        self.failed = 0
+        self.errors = []
+        self.usar_move = False
+
+        # UI PRINCIPAL
+        main_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=12)
+        self.add(main_vbox)
+
+        # 1. HEADERBAR
+        header = Gtk.HeaderBar()
+        header.set_show_close_button(True)
+        header.set_title("Chronos Arkhe — Organizar Fotos por Data")
+        self.set_titlebar(header)
+
+        # 2. PAINEL DE CONTROLO
+        ctrl_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        main_vbox.pack_start(ctrl_box, False, False, 0)
+
+        lbl_desc = Gtk.Label(label="Selecione fotos para organizar por data EXIF")
+        lbl_desc.set_xalign(0)
+        ctrl_box.pack_start(lbl_desc, False, False, 0)
+
+        grid = Gtk.Grid()
+        grid.set_row_spacing(8)
+        grid.set_column_spacing(15)
+        ctrl_box.pack_start(grid, False, False, 0)
+
+        self.check_ask = Gtk.CheckButton(label="Pedir Evento e Local para cada data")
+        self.check_ask.set_active(self.cfg.get("ask_mode", True))
+        grid.attach(self.check_ask, 0, 0, 2, 1)
+
+        lbl_modo = Gtk.Label(label="Operação:")
+        lbl_modo.set_xalign(1)
+        grid.attach(lbl_modo, 0, 1, 1, 1)
+
+        self.toggle_move = Gtk.ToggleButton(label="Copiar (padrão)")
+        self.toggle_move.set_active(self.cfg.get("usar_move", False))
+        self.toggle_move.connect("toggled", self._on_toggle_move)
+        grid.attach(self.toggle_move, 1, 1, 1, 1)
+
+        # Pasta destino
+        frame_dest = Gtk.Frame(label="Pasta de Destino")
+        box_dest = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, margin=8)
+
+        default_pasta = self.cfg.get("ultima_pasta", str(pathlib.Path.home() / "Imagens"))
+        self.lbl_pasta = Gtk.Label(label=default_pasta)
+        self.lbl_pasta.set_xalign(0)
+        self.lbl_pasta.set_halign(Gtk.Align.FILL)
+        self.lbl_pasta.set_line_wrap(True)
+        self.lbl_pasta.set_selectable(True)
+        if HAS_EXIFREAD:  # Reutilizar verificação de módulo
+            try:
+                self.lbl_pasta.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            except:
+                pass
+        self.pasta_destino = default_pasta
+
+        btn_browse = Gtk.Button(label="Procurar...")
+        btn_browse.get_style_context().add_class(Gtk.STYLE_CLASS_SUGGESTED_ACTION)
+        btn_browse.connect("clicked", self._on_browse)
+
+        box_dest.pack_start(self.lbl_pasta, True, True, 0)
+        box_dest.pack_end(btn_browse, False, False, 0)
+        frame_dest.add(box_dest)
+        ctrl_box.pack_start(frame_dest, False, False, 0)
+
+        # 3. NAVEGADOR & PREVIEW (HSplit)
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        main_vbox.pack_start(paned, True, True, 0)
+
+        # Navegador esquerda
+        file_chooser = Gtk.FileChooserWidget(
+            action=Gtk.FileChooserAction.OPEN,
+            select_multiple=True
+        )
+        file_chooser.set_local_only(False)
+
+        filter_imgs = Gtk.FileFilter()
+        filter_imgs.set_name("Imagens e RAWs")
+        for ext in sorted(IMAGE_EXTS):
+            filter_imgs.add_pattern(f"*{ext}")
+            filter_imgs.add_pattern(f"*{ext.upper()}")
+        file_chooser.add_filter(filter_imgs)
+
+        filter_all = Gtk.FileFilter()
+        filter_all.set_name("Todos os ficheiros")
+        filter_all.add_pattern("*")
+        file_chooser.add_filter(filter_all)
+
+        paned.pack1(file_chooser, resize=True, shrink=False)
+
+        # Preview direita
+        right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
+        right_box.set_size_request(300, -1)
+
+        self.img_preview = Gtk.Image.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.DIALOG)
+        scroll_preview = Gtk.ScrolledWindow()
+        scroll_preview.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll_preview.set_size_request(250, 200)
+        scroll_preview.add(self.img_preview)
+        right_box.pack_start(scroll_preview, False, False, 0)
+
+        lbl_sel = Gtk.Label(label="Ficheiros:")
+        lbl_sel.set_xalign(0)
+        right_box.pack_start(lbl_sel, False, False, 0)
+
+        self.liststore = Gtk.ListStore(str, str)
+        self.treeview = Gtk.TreeView(model=self.liststore)
+        col = Gtk.TreeViewColumn("Ficheiro", Gtk.CellRendererText(), text=0)
+        col.set_resizable(True)
+        self.treeview.append_column(col)
+
+        scroll_list = Gtk.ScrolledWindow()
+        scroll_list.add(self.treeview)
+        right_box.pack_start(scroll_list, True, True, 0)
+
+        btn_clear = Gtk.Button(label="Limpar")
+        btn_clear.connect("clicked", lambda w: file_chooser.unselect_all())
+        right_box.pack_end(btn_clear, False, False, 0)
+
+        paned.pack2(right_box, resize=False, shrink=True)
+        paned.set_position(550)
+
+        def atualizar_lista():
+            self.ficheiros = file_chooser.get_filenames()
+            self.liststore.clear()
+            for f in self.ficheiros:
+                self.liststore.append([os.path.basename(f), f])
+            if self.ficheiros:
+                pixbuf = image_to_pixbuf(self.ficheiros[0])
+                if pixbuf:
+                    self.img_preview.set_from_pixbuf(pixbuf)
+
+        file_chooser.connect("selection-changed", lambda w: atualizar_lista())
+
+        # 4. PAINEL DE LOG
+        frame_log = Gtk.Frame(label="Progresso")
+        box_log = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=8)
+
+        self.progress = Gtk.ProgressBar()
+        self.progress.set_fraction(0)
+        box_log.pack_start(self.progress, False, False, 0)
+
+        scroll_log = Gtk.ScrolledWindow()
+        scroll_log.set_size_request(-1, 100)
+        scroll_log.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+
+        self.text_log = Gtk.TextView()
+        self.text_log.set_editable(False)
+        self.text_log.set_monospace(True)
+        scroll_log.add(self.text_log)
+        box_log.pack_start(scroll_log, True, True, 0)
+
+        frame_log.add(box_log)
+        main_vbox.pack_start(frame_log, False, False, 0)
+
+        # 5. BOTÕES DE AÇÃO
+        action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10, margin=10)
+        main_vbox.pack_end(action_box, False, False, 0)
+
+        self.btn_cancel = Gtk.Button(label="Cancelar")
+        self.btn_cancel.connect("clicked", lambda w: Gtk.main_quit())
+        action_box.pack_end(self.btn_cancel, False, False, 0)
+
+        self.btn_start = Gtk.Button(label="Iniciar Organização")
+        self.btn_start.get_style_context().add_class(Gtk.STYLE_CLASS_SUGGESTED_ACTION)
+        self.btn_start.connect("clicked", self._on_start)
+        action_box.pack_end(self.btn_start, False, False, 0)
+
+    def _on_toggle_move(self, widget):
+        if widget.get_active():
+            widget.set_label("Mover ficheiros")
+        else:
+            widget.set_label("Copiar (padrão)")
+
+    def _on_browse(self, widget):
+        pasta_atual = self.pasta_destino or str(pathlib.Path.home() / "Imagens")
+        if not os.path.isdir(pasta_atual):
+            try:
+                os.makedirs(pasta_atual, exist_ok=True)
+            except OSError:
+                pasta_atual = str(pathlib.Path.home())
+
+        dlg = Gtk.FileChooserDialog(
+            title="Escolher pasta de destino",
+            parent=self,
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+        )
+        dlg.add_buttons("Cancelar", Gtk.ResponseType.CANCEL, "Selecionar", Gtk.ResponseType.OK)
+        dlg.set_current_folder(pasta_atual)
+
+        btn_ok = dlg.get_widget_for_response(Gtk.ResponseType.OK)
+        if btn_ok:
+            btn_ok.get_style_context().add_class(Gtk.STYLE_CLASS_SUGGESTED_ACTION)
+
+        if dlg.run() == Gtk.ResponseType.OK:
+            self.pasta_destino = dlg.get_filename()
+            self.lbl_pasta.set_label(self.pasta_destino)
+        dlg.destroy()
+
+    def _log(self, text):
+        def _append():
+            buf = self.text_log.get_buffer()
+            buf.insert(buf.get_end_iter(), text + "\n")
+            self.text_log.scroll_to_mark(buf.get_insert(), 0, False)
+        GLib.idle_add(_append)
+
+    def _on_start(self, widget):
+        if not self.ficheiros:
+            dlg = Gtk.MessageDialog(
+                parent=self, flags=Gtk.DialogFlags.MODAL,
+                message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.OK,
+                text="Seleciona pelo menos uma foto."
+            )
+            dlg.run(); dlg.destroy()
+            return
+
+        self.state = "PROCESSING"
+        self.processed = 0
+        self.failed = 0
+        self.errors = []
+        self.abort = False
+        self.btn_start.set_sensitive(False)
+        self.text_log.get_buffer().set_text("")
+        self._log("🚀 Iniciando processamento...\n")
+
+        self.usar_move = self.toggle_move.get_active()
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _worker(self):
+        try:
+            # 1. Agrupa por data
+            self._log("📅 Extraindo datas EXIF...")
+            self.datas = {}
+            fontes = {'pillow': 0, 'exifread': 0, 'mtime': 0}
+            
+            for f in self.ficheiros:
+                if self.abort:
+                    break
+                if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+                    continue
+                
+                dt, used_fb, fonte = obter_data_exif(f)
+                fontes[fonte] = fontes.get(fonte, 0) + 1
+                data_str = dt.strftime("%Y%m%d")
+                self.datas.setdefault(data_str, []).append(f)
+
+            datas_ord = sorted(self.datas.keys())
+            self._log(f"✅ {len(datas_ord)} data(s) encontrada(s) | "
+                     f"Pillow={fontes['pillow']}, exifread={fontes['exifread']}, mtime={fontes['mtime']}")
+
+            # 2. Pedir Evento/Local se necessário
+            if self.check_ask.get_active():
+                self._log("📝 Aguardando entrada de Evento/Local...\n")
+                for d in datas_ord:
+                    if self.abort:
+                        break
+                    # TODO: Diálogo por data (simplificado por enquanto)
+                    self.info[d] = ("Evento", "Local")
+            else:
+                for d in datas_ord:
+                    self.info[d] = ("Evento", "Local")
+
+            # 3. Processar ficheiros
+            self._log("🔄 Processando ficheiros...")
+            os.makedirs(self.pasta_destino, exist_ok=True)
+
+            for d in datas_ord:
+                if self.abort:
+                    break
+                ev, loc = self.info[d]
+                pasta = f"{d}_{sanitize(ev)}_{sanitize(loc)}"
+                dir_dest = os.path.join(self.pasta_destino, pasta)
+                os.makedirs(dir_dest, exist_ok=True)
+
+                for f in self.datas[d]:
+                    if self.abort:
+                        break
+                    try:
+                        sidecars = get_sidecars(f)
+                        batch = [f] + sidecars
+
+                        for file_to_process in batch:
+                            base, ext = os.path.splitext(os.path.basename(file_to_process))
+                            dest = os.path.join(dir_dest, os.path.basename(file_to_process))
+
+                            if os.path.exists(dest):
+                                i = 1
+                                while os.path.exists(os.path.join(dir_dest, f"{base}_{i}{ext}")):
+                                    i += 1
+                                dest = os.path.join(dir_dest, f"{base}_{i}{ext}")
+
+                            if self.usar_move:
+                                shutil.move(file_to_process, dest)
+                            else:
+                                shutil.copy2(file_to_process, dest)
+
+                            if file_to_process == f:
+                                self.processed += 1
+
+                    except Exception as e:
+                        self.failed += 1
+                        self.errors.append(f"{os.path.basename(f)}: {e}")
+                        self._log(f"❌ {os.path.basename(f)}: {e}")
+
+                frac = (datas_ord.index(d) + 1) / len(datas_ord)
+                GLib.idle_add(lambda: self.progress.set_fraction(frac))
+
+            # Salvar config
+            self.cfg["ultima_pasta"] = self.pasta_destino
+            self.cfg["ask_mode"] = self.check_ask.get_active()
+            self.cfg["usar_move"] = self.usar_move
+            save_config(self.cfg)
+
+            operacao = "movidas" if self.usar_move else "copiadas"
+            msg = f"\n✅ Concluído! {self.processed} foto(s) {operacao}"
+            if self.failed:
+                msg += f"\n❌ {self.failed} erro(s)"
+            self._log(msg)
+
+        except Exception as e:
+            self._log(f"❌ ERRO: {e}")
+        finally:
+            GLib.idle_add(lambda: self.btn_start.set_sensitive(True))
+            self.state = "IDLE"
+
+def main():
+    # Processar modo Nautilus (argumentos CLI)
+    ficheiros_iniciais = None
+    if len(sys.argv) > 1 and sys.argv[1] != '--debug':
+        ficheiros_iniciais = []
+        for u in sys.argv[1:]:
+            path = _normalizar_uri(u)
+            if os.path.isfile(path):
+                ficheiros_iniciais.append(path)
+
+    app = ChronosArkheApp(initial_files=ficheiros_iniciais)
+    app.show_all()
+    Gtk.main()
+
+if __name__ == "__main__":
+    main()

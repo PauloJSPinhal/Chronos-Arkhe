@@ -10,90 +10,72 @@ e o projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 ## [Unreleased]
 
 ### Planeado
+- Integração com `exifread` para extração fiável de datas em ficheiros RAW ✓
+- Corrigir filtro `file://` em URIs do Nautilus ✓
+- Escrita atómica do `historico.json` via `os.replace` ✓
 - Diálogo de gestão de histórico (apagar entradas obsoletas)
 - Thumbnail assíncrono para não bloquear a UI
-- Suporte a vídeos (extração de data via `ffmpeg`)
-- Modo batch: processar múltiplas pastas em fila
+
+---
+
+## [6.0] — 2026-10-31
+
+### Adicionado
+- **Aplicação GTK3 completa** — Interface melhorada com navegador de ficheiros integrado
+- **Botão Toggle Mover/Copiar** — Escolhe se pretende copiar (padrão) ou mover ficheiros
+- **Preview de imagens** — Visualiza miniaturas das fotos selecionadas
+- **Integração Nautilus melhorada** — Script de contexto instalado via `install.sh`
+- **Ficheiro .desktop** — Aplicação registrada no menu de aplicações GNOME/KDE
+- **Scripts de instalação/desinstalação** — Verificação de dependências Python
+- **Documentação completa** — `USAGE.md` com exemplos e troubleshooting
+- **Modo debug melhorado** — Flag `--debug` com diagnóstico EXIF detalhado
+
+### Alterado
+- `main()` refatorizada para aceitar lista de ficheiros pré-fornecida
+- Nova função `janela_principal_simples()` com suporte a toggle Mover/Copiar
+- Função auxiliar `processar_ficheiro()` para abstração copy/move
+- Mensagem final dinâmica que reflete modo (copiado vs movido)
+- Compatibilidade mantida com modo Nautilus (argumentos CLI)
+
+### Corrigido
+- Nenhum bug de v5.5 reportado
+
+### Nota de Compatibilidade
+- ✅ Modo Nautilus mantido (clica direito em ficheiros)
+- ✅ Modo CLI mantido (`chronos-arkhe *.jpg`)
+- ✅ Flag --debug mantida para diagnóstico
+- ✅ Histórico JSON mantido (compatível com v5.x)
 
 ---
 
 ## [5.5] — 2024
 
 ### Adicionado
-- **Seletor de pasta de destino** via `Gtk.FileChooserDialog` — substitui o
-  antigo checkbox "Criar pasta(s) um nível acima". Agora o utilizador pode
-  escolher explicitamente onde as pastas `AAAAMMDD_Evento_Local` serão criadas,
-  com navegação real pelo sistema de ficheiros.
-- **Pasta inicial do filechooser**: `/home/$USER/Imagens` (criada automaticamente
-  se não existir). Garante que o diálogo abre num local útil, não em `/`.
-- **Persistência da última pasta escolhida** — guardada no `historico.json`
-  sob a chave `ultima_pasta`. Na próxima execução, o diálogo inicial abre
-  com essa pasta já pré-selecionada.
-- **Label visível na janela inicial** mostra o caminho completo da pasta
-  escolhida (com `ellipsize=MIDDLE` para caminhos longos).
-
-### Removido
-- **Checkbox "Criar pasta(s) um nível acima"** — substituído pelo seletor
-  de pasta, que é mais flexível e explícito. O comportamento equivalente
-  pode ser obtido escolhendo a pasta pai no filechooser.
+- Seletor de pasta de destino via Gtk.FileChooserDialog
+- Pasta inicial do filechooser: `/home/$USER/Imagens` (criada se não existir)
+- Persistência da última pasta escolhida no histórico JSON
+- Pré-seleção automática da última pasta na próxima execução
 
 ### Alterado
-- `janela_principal()` passa a aceitar o parâmetro `ultima_pasta=None`
-  para pré-preencher o campo de destino.
-- `load_history()` retorna 3 valores: `(eventos, locais, ultima_pasta)`.
-- `save_history()` aceita o parâmetro `ultima_pasta=None` para persistir
-  a escolha do utilizador.
-- Lógica de movimentação simplificada: `dir_dest = pasta_destino + pasta`
-  em vez do cálculo `current_dir` / `dir_base` anterior.
-- Garantia de criação da pasta de destino (`os.makedirs(pasta_destino,
-  exist_ok=True)`) antes do loop de processamento — protege contra pastas
-  apagadas entretanto.
+- Substituído "Criar pasta(s) um nível acima" por seletor explícito
+- Navegação real de ficheiros em vez de diálogo simples
+
+### Corrigido
+- Manutenção do estado da pasta entre execuções
 
 ---
 
 ## [5.4] — 2024
 
 ### Adicionado
-- **Fallback `exifread` para extração fiável de datas em ficheiros RAW** — quando o
-  Pillow não consegue abrir um RAW (CR2, NEF, ARW, etc.), o `exifread` lê os bytes
-  EXIF brutos sem decodificar pixels, evitando o fallback para `mtime`.
-  O `exifread` é uma dependência opcional — se não estiver instalado, o script
-  continua a funcionar, mas volta a usar `mtime` para RAWs.
-- **Diálogo de final com aviso de fotos sem EXIF** — lista as primeiras 3 fotos
-  que ficaram com data de modificação (em vez de captura), e sugere instalar
-  `exifread` se for o caso.
-- **Sugestão de instalação do `exifread`** no relatório final quando aplicável.
+- Extração EXIF fiável para RAWs via exifread (fallback)
 
 ### Corrigido
-- **Filtro de URIs `file://` do Nautilus** — anteriormente, `os.path.isfile(u)`
-  era avaliado antes de remover o prefixo `file://`, pelo que nenhum ficheiro
-  vindo do Nautilus passava o filtro. Agora a normalização acontece primeiro,
-  via função dedicada `_normalizar_uri()`.
-- **Removida tag EXIF 306 (`DateTime`)** da lista de tags tentadas — esta tag
-  representa a data de modificação do ficheiro, não a data de captura. Estava
-  a corromper datas em fotos pós-processadas (exportadas, editadas).
-  Lista de tags reduzida para `(36867, 36868)` apenas.
-- **Sanitização agora substitui underscores por hífens** — evita o bug
-  `20240101_Festa_Casa_Local` (com 2 underscores como separador), garantindo
-  separador único e consistente.
-- **`sanitize('')` agora retorna `'Indefinido'`** em vez de string vazia —
-  anteriormente, o early return `if not text: return text` impedia o fallback.
-- **Check `if f in processed` movido para antes de `os.makedirs()`** — evita
-  chamada desnecessária ao sistema para ficheiros já processados.
-
-### Alterado
-- **Escrita atómica do `historico.json`** via `os.replace()` — grava para
-  `.tmp` e faz rename atómico, evitando corrupção se o processo for
-  interrompido a meio do `json.dump`.
-- **Refactor de `obter_data_exif()`** em 3 funções especializadas:
-  `_exif_from_pillow()`, `_exif_from_exifread()`, `_parse_exif_date()`.
-  Mais fácil de testar e manter.
-- **`getexif()` chamado directamente** (Pillow 10+) em vez do `getattr` com
-  fallback para `_getexif()` (removido em Pillow ≥ 10).
-- **Diálogos GTK3 com `set_modal(True)`** — comportamento mais previsível
-  em diferentes window managers.
-- **Título do diálogo principal** atualizado para "Chronos — Organizar
-  Fotos por Data" (era apenas "Organizar Fotos por Data").
+- Corrigido filtro de URIs `file://` do Nautilus
+- Removida tag EXIF 306 (DateTime = data de modificação, não de captura)
+- Sanitização substitui underscores por hífens (separador consistente)
+- Escrita atómica do histórico JSON (`os.replace`)
+- Refactor: `getexif()` directo (Pillow 10+), `_getexif` removido
 
 ---
 

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Chronos — Organizar Fotos
+Comment=Organiza fotos por data de captura
+Keywords=fotos;organizador;data;exif;
+Exec=chronos-arkhe
+Icon=image-x-generic
+Categories=Multimedia;Graphics;Photography;
+Terminal=false
+MimeType=image/jpeg;image/png;image/tiff;image/x-canon-cr2;image/x-canon-crw;image/x-canon-cr3;image/x-nikon-nef;image/x-sony-arw;
+
+# Nautilus integration
+X-Nautilus-Actions=true

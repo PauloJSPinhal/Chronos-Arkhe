@@ -1,54 +1,283 @@
-# Chronos-Photo-Organizer
+# Chronos Arkhe
 
-> Script GTK3 (Nautilus) para organizar fotografias por data de captura EXIF, com suporte a ficheiros RAW e sidecars XMP/PP3/DOP.
+Aplicação nativa GTK3/GNOME e script de contexto para o **Nautilus** concebida para a organização segura de acervos fotográficos por data de captura (EXIF), com suporte a modo cópia/movimento, pré-visualização de miniaturas, histórico de eventos e locais, e logging em tempo real.
 
-[![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
-[![GTK3](https://img.shields.io/badge/GTK-3.0-green.svg)](https://www.gtk.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20BSD-lightgrey.svg)](https://github.com/Chronos-Photo-Organizer)
-[![Version](https://img.shields.io/badge/version-5.5-orange.svg)](./CHANGELOG.md)
+Integra a suite fotográfica **Chronos** (*Arkhe*, *Nomos*, *Sfragis*, *Gnosis*).
 
 ---
 
-## 📋 Índice
+## 📋 Padrão de Organização
 
-- [Descrição](#-descrição)
-- [Funcionalidades](#-funcionalidades)
-- [Screenshots](#-screenshots)
-- [Requisitos](#-requisitos)
-- [Instalação](#-instalação)
-- [Utilização](#-utilização)
-- [Convenção de nomes](#-convenção-de-nomes)
-- [Formatos suportados](#-formatos-suportados)
-- [Histórico de eventos e locais](#-histórico-de-eventos-e-locais)
-- [Sanitização inteligente](#-sanitização-inteligente)
-- [Limitações conhecidas](#-limitações-conhecidas)
-- [Roadmap](#-roadmap)
-- [Contribuir](#-contribuir)
-- [Changelog](#-changelog)
-- [Licença](#-licença)
+O **Chronos Arkhe** estrutura as pastas segundo o padrão:
 
----
+```text
+{AAAAMMDD}_Evento_Local/
+├── foto1.jpg
+├── foto2.jpg
+└── foto3.jpg
+```
 
-## 📖 Descrição
+### Exemplo Prático:
 
-O **Chronos** é um script Python + GTK3 desenhado para integrar no menu de scripts do Nautilus (GNOME Files). Permite selecionar um conjunto de fotografias (JPEG, TIFF, PNG ou RAW de qualquer câmara moderna) e organizá-las automaticamente em pastas com base na **data real de captura** extraída dos metadados EXIF — e não na data de modificação do ficheiro.
+```text
+20261031_Reunião_SCP/
+├── IMG_001.JPG
+├── IMG_002.JPG
+└── RAW_001.CR2
 
-Para cada data distinta, o script abre um diálogo GTK que mostra um thumbnail da primeira foto dessa data e pede ao utilizador um **Evento** e um **Local**. Esses valores, combinados com a data, formam o nome da pasta destino no formato `AAAAMMDD_Evento_Local`. O histórico de eventos e locais é guardado em JSON para auto-completar em utilizações futuras.
+20261030_Passeio_Praia/
+├── DSCF001.JPG
+├── DSCF002.JPG
+└── DSCF002.JPG.xmp  (sidecar preservado)
+```
 
-O script move também os **ficheiros sidecar** associados a cada fotografia (`.xmp`, `.pp3`, `.dop`), preservando o trabalho de edição feito em ferramentas como Darktable, RawTherapee ou DxO PhotoLab.
+### Componentes:
+* **`{AAAAMMDD}`**: Carimbo temporal obtido a partir dos metadados EXIF da imagem (`DateTimeOriginal`). Se o EXIF estiver ausente, recorre à data de modificação do ficheiro.
+* **`{Evento}`**: Classificação do tipo de evento (ex.: Reunião, Passeio, Trabalho). Guardado em histórico para auto-completar.
+* **`{Local}`**: Localização geográfica (ex.: SCP, Praia, Escritório). Guardado em histórico para auto-completar.
 
 ---
 
 ## ✨ Funcionalidades
 
-- 📅 **Agrupamento por data de captura EXIF** (Tag 36867 `DateTimeOriginal`), não por data de modificação do ficheiro.
-- 🖼️ **Pré-visualização** da primeira foto de cada data no diálogo de configuração.
-- 🗂️ **Suporte a sidecars** XMP, PP3 e DOP — move-os automaticamente com a foto principal.
-- ⌨️ **Histórico persistente** de eventos e locais em `~/.config/organizar_fotos/historico.json`, com auto-completar via ComboBox.
+* **Agrupamento por Data EXIF:** Organiza fotos pela data real de captura, não pela data de modificação do ficheiro.
+* **Pré-visualização Integrada:** Mostra thumbnails das imagens antes de processar, com zoom e navegação.
+* **Navegador de Ficheiros:** Seletor integrado para escolher pasta de origem.
+* **Toggle Copiar/Mover:** Botão para alternar entre cópia (padrão) e movimento de ficheiros.
+* **Suporte a Sidecars:** Localiza e move automaticamente ficheiros `.xmp`, `.pp3`, `.dop` (metadados de edição não-destrutiva).
+* **Histórico Persistente:** Guarda eventos e locais em `~/.config/chronos/arkhe.json` para auto-completar em utilizações futuras.
+* **Logging em Tempo Real:** Painel de log mostra cada passo da operação em direto.
+* **Progress Bar:** Barra de progresso atualiza-se segundo a segundo durante o processamento.
+* **Memória de Estado (XDG):** Preserva a última pasta e preferências em `~/.config/chronos/arkhe.json`.
+* **Duplo Modo de Utilização:** Funciona como aplicação autónoma através do lançador do sistema ou diretamente no menu de clique direito do Nautilus.
+
+---
+
+## 📦 Estrutura do Projeto
+
+```text
+Chronos-Arkhe/
+├── bin/
+│   └── chronos-arkhe              # Executável Python (sem extensão .py)
+├── data/
+│   ├── chronos-arkhe.desktop      # Ficheiro de entrada XDG Desktop
+│   └── icons/
+│       └── hicolor/
+│           └── scalable/
+│               └── apps/
+│                   └── chronos-arkhe.svg  # Ícone vetorial oficial
+├── debian/                        # Metadados de empacotamento Debian
+│   ├── control
+│   ├── postinst
+│   └── prerm
+├── docs/                          # Recursos e documentação adicional
+│   └── dev/                       # Documentação de desenvolvimento
+├── scripts/                       # Scripts de instalação e utilitários
+│   ├── install.sh                 # Instalador local (~/.local)
+│   ├── uninstall.sh               # Desinstalador local
+│   ├── build-deb.sh               # Gerador de pacotes .deb
+│   ├── run.sh                     # Executor de desenvolvimento
+│   ├── enable-nautilus-script.sh  # Ativa integração Nautilus
+│   └── disable-nautilus-script.sh # Desativa integração Nautilus
+├── LICENSE
+└── README.md
+```
+
+---
+
+## 🔧 Requisitos do Sistema
+
+Distribuições baseadas em Debian / Ubuntu com GNOME:
+
+```bash
+sudo apt update
+sudo apt install python3 python3-gi gir1.2-gtk-3.0
+```
+
+### Dependências Opcionais:
+
+```bash
+# Para pré-visualização de miniaturas (recomendado)
+pip install Pillow
+
+# Para leitura melhorada de EXIF em RAWs
+pip install exifread
+
+# Para gestão avançada de metadados
+sudo apt install libimage-exiftool-perl
+```
+
+---
+
+## 🚀 Instalação e Distribuição
+
+### Opção 1: Instalação Local (utilizador atual, sem privilégios root)
+
+Instala em `~/.local/bin`, cria o lançador em `~/.local/share/applications`, configura o ícone e faz a ligação ao Nautilus:
+
+```bash
+chmod +x scripts/install.sh scripts/uninstall.sh
+scripts/install.sh
+```
+
+Para remover a instalação local:
+```bash
+scripts/uninstall.sh
+```
+
+---
+
+### Opção 2: Empacotamento Nativo Debian (`.deb`)
+
+Para gerar o pacote instalável no sistema:
+
+```bash
+chmod +x scripts/build-deb.sh
+scripts/build-deb.sh
+```
+
+O ficheiro gerado fica disponível em `build/chronos-arkhe_6.0.0_all.deb`. Para instalar a nível do sistema:
+
+```bash
+sudo apt install ./build/chronos-arkhe_6.0.0_all.deb
+```
+
+Para desinstalar o pacote:
+```bash
+sudo apt remove chronos-arkhe
+```
+
+---
+
+### Opção 3: Execução Direta do Código-Fonte
+
+Para testes e desenvolvimento:
+
+```bash
+chmod +x scripts/run.sh
+scripts/run.sh
+```
+
+---
+
+## 🖥️ Como Usar
+
+### Como Aplicação Independente:
+1. Abra o menu de aplicações do GNOME e procure por **Chronos Arkhe**.
+2. Ou execute no terminal:
+   ```bash
+   chronos-arkhe
+   ```
+3. Selecione a pasta que contém as fotografias a processar.
+4. Escolha as fotos a organizar (ou selecione todas).
+5. (Opcional) Alterne entre **Copiar** (padrão) e **Mover** usando o toggle.
+6. Clique em **Processar** e veja o log em tempo real.
+
+### Via Menu de Contexto do Nautilus:
+1. No explorador de ficheiros, navegue até à pasta com as fotos.
+2. Clique com o botão direito → **Scripts** → **Chronos Arkhe**.
+3. Siga os mesmos passos que acima.
+
+---
+
+## 📋 Convenção de Nomes
+
+As pastas geradas seguem a convenção:
+
+```
+AAAAMMDD_Evento_Local/
+```
+
+Onde:
+- **AAAAMMDD** = Data da primeira fotografia (formato ISO 8601 compacto)
+- **Evento** = Classificação do tipo de evento (ex.: Reunião, Passeio, Conferência)
+- **Local** = Localização geográfica (ex.: SCP, Praia, Lisboa)
+
+### Exemplos:
+```
+20261031_Reunião_SCP/
+20261030_Passeio_Praia/
+20261025_Conferência_Lisboa/
+```
+
+---
+
+## 🖼️ Formatos Suportados
+
+### Fotografias:
+- **JPEG** (`.jpg`, `.jpeg`)
+- **TIFF** (`.tif`, `.tiff`)
+- **PNG** (`.png`)
+- **RAW** (`.cr2`, `.nef`, `.arw`, `.dng`, `.raf`, etc.)
+
+### Sidecars (Metadados Não-Destrutivos):
+- **Adobe** (`.xmp`)
+- **DxO PhotoLab** (`.dop`)
+- **RawTherapee** (`.pp3`)
+
+---
+
+## 📝 Histórico de Eventos e Locais
+
+O aplicativo mantém um histórico JSON em `~/.config/chronos/arkhe.json`:
+
+```json
+{
+  "eventos": ["Reunião", "Passeio", "Conferência"],
+  "locais": ["SCP", "Praia", "Lisboa"],
+  "ultima_pasta": "/home/usuario/Fotos"
+}
+```
+
+Ao executar novamente, os campos de Evento e Local apresentam auto-completar com os valores anteriores.
+
+---
+
+## 🔍 Sanitização Inteligente
+
+O nome da pasta é sanitizado automaticamente:
+- Remove caracteres especiais e espaços duplos
+- Converte acentos (ex.: `Praia` em vez de `Pràia`)
+- Limita comprimento máximo de caminho para compatibilidade
+
+---
+
+## ⚠️ Limitações Conhecidas
+
+- Requer GNOME/Nautilus (não foi testado com Dolphin, Thunar, etc.)
+- Leitura de EXIF depende de `exifread` Python ou `exiftool` externo
+- Não oferece UI para ajuste de data EXIF antes de organizar (usar `exiftool` separadamente se necessário)
+- Sem suporte a Wayand (apenas X11/GNOME)
+
+---
+
+## 🛣️ Roadmap
+
+Melhorias planeadas:
+- [ ] Suporte a "Cancelar" operação em curso
+- [ ] Diálogo de pré-visualização antes de confirmar organização
+- [ ] Histórico de operações (para possível desfazer)
+- [ ] Integração com Geotagging (lat/lon → local automático)
+- [ ] Geração de relatórios em PDF
+
+---
+
+## 🤝 Contribuir
+
+Encontrou um bug ou tem uma sugestão? Abra uma issue em:
+[PauloJSPinhal/Chronos-Photo-Organizer](https://github.com/PauloJSPinhal/Chronos-Photo-Organizer)
+
+---
+
+## 📄 Licença
+
+Distribuído sob os termos da licença MIT. Consulte [LICENSE](LICENSE) para detalhes adicionais.
 - 🧹 **Sanitização inteligente** de nomes: preserva acentos e hífens existentes (ex.: "Trás-os-Montes"), substitui espaços por hífens, normaliza separadores duplicados.
 - 🌙 **Tema dark herdado** do GNOME — sem ofuscar os olhos em sessões de edição noturnas.
-- 📁 **Seletor de pasta de destino** via `Gtk.FileChooserDialog` — abre em `~/Imagens`, persiste a última escolha.
+- 🎯 **Modo Nautilus** — Integração com Nautilus File Manager via script de contexto.
+- ⚙️ **Aplicação independente** — Executa como app GTK com interface melhorada.
+- 🐛 **Modo debug** — Diagnóstico detalhado com `--debug` flag.
+- 📁 **Opção "um nível acima"** para criar as pastas fora da pasta atual (útil ao organizar fotos dentro de uma pasta "raw" e querer as estruturadas na pasta pai).
 - 🔁 **Resolução de conflitos** automática com sufixo `_1`, `_2`, ... quando já existe ficheiro com o mesmo nome.
 - 🎞️ **29 extensões RAW suportadas**: CR2, CR3, NEF, ARW, DNG, ORF, RW2, PEF, SRW, RAF, etc.
 
@@ -142,7 +371,7 @@ Os argumentos podem ser paths absolutos ou URIs `file://` (formato recebido do N
 2. Botão direito → **Scripts → Chronos.py**.
 3. No diálogo inicial, escolher:
    - ✅ **Pedir Evento e Local para cada data** (recomendado) — abre um diálogo por data distinta.
-   - 📁 **Pasta de destino** — clica em **Procurar...** para abrir um navegador de ficheiros que abre em `~/Imagens`. A pasta escolhida fica visível no diálogo e é guardada para a próxima execução.
+   - ⬆️ **Criar pasta(s) um nível acima** — útil para organizar fotos dentro de `raw/` e receber pastas estruturadas em `../estruturadas/`.
 4. Para cada data distinta, o diálogo mostra um thumbnail da primeira foto dessa data. Preencher **Evento** e **Local** (com auto-completar do histórico). Ambos os campos têm de estar preenchidos para o botão **OK** ficar ativo.
 5. Confirmar com **OK** ou cancelar (a data fica com nome padrão `Evento_Local`).
 6. No fim, aparece um resumo com:
@@ -245,15 +474,13 @@ O Chronos mantém um histórico JSON em:
     "Lisboa",
     "Porto",
     "Trás-os-Montes"
-  ],
-  "ultima_pasta": "/home/utilizador/Imagens/2024"
+  ]
 }
 ```
 
-- Os valores de `eventos` e `locais` são guardados **exatamente como escritos** (texto cru, com acentos e espaços).
-- `ultima_pasta` guarda a última pasta de destino escolhida no diálogo inicial, para re-aparecer pré-selecionada na próxima execução.
+- Os valores são guardados **exatamente como escritos** (texto cru, com acentos e espaços).
 - A ordenação é alfabética, automática ao gravar.
-- Os duplicados são eliminados via `set()`.
+- Os duplicates são eliminados via `set()`.
 - Em diálogos futuros, estes valores aparecem como sugestões no ComboBox.
 
 ### Backup do histórico
@@ -268,7 +495,7 @@ cp ~/.config/organizar_fotos/historico.json ~/dotfiles/chronos/
 
 ## 🧹 Sanitização inteligente
 
-A função `sanitize()` (em `chronos.py`, linha ~174) é o coração da coerência dos nomes de pasta. Aplica as seguintes transformações:
+A função `sanitize()` (em `chronos.py`, linha ~110) é o coração da coerência dos nomes de pasta. Aplica as seguintes transformações:
 
 | Input | Output | Notas |
 |---|---|---|
@@ -277,7 +504,6 @@ A função `sanitize()` (em `chronos.py`, linha ~174) é o coração da coerênc
 | `São João!!` | `São-João` | Pontuação removida, acentos mantidos |
 | `A -- B` | `A-B` | Hífens duplos colapsados |
 | `-Natal-` | `Natal` | Hífens nas pontas removidos |
-| `Festa_Casa` | `Festa-Casa` | Underscores → hífens (separador consistente) |
 | `(vazio)` | `Indefinido` | Fallback quando input vazio |
 
 ### Expressão regular principal
@@ -290,7 +516,7 @@ re.sub(r'[^\w-]', '', t, flags=re.UNICODE)  # \w em Python 3 já inclui acentos
 
 ## ⚠️ Limitações conhecidas
 
-1. **Datas em RAW podem usar mtime como fallback** — se o Pillow não conseguir extrair EXIF e o `exifread` não estiver instalado, a data de modificação é usada. Recomenda-se instalar `exifread` (`pip install exifread`) para suporte completo a RAWs. O script avisa no relatório final quando isto acontece.
+1. **Datas em RAW podem usar mtime como fallback** — em versões atuais, se o Pillow não conseguir extrair EXIF (caso de RAWs exóticos), a data de modificação é usada. Planeado: integração com `exifread` ou `exiftool` (ver [Roadmap](#-roadmap)).
 
 2. **Thumbnail síncrono** — a geração de thumbnails em RAWs grandes pode bloquear a UI por 1-3 segundos por foto. Solução planeada: carregar thumbnails em thread.
 
@@ -304,15 +530,13 @@ re.sub(r'[^\w-]', '', t, flags=re.UNICODE)  # \w em Python 3 já inclui acentos
 
 ## 🗺️ Roadmap
 
-- [x] **v5.4** — Integração com `exifread` para extração fiável de datas em RAWs ✅
-- [x] **v5.4** — Corrigir filtro `file://` em URIs do Nautilus ✅
-- [x] **v5.4** — Escrita atómica do `historico.json` (via `os.replace`) ✅
-- [x] **v5.5** — Seletor de pasta de destino via `Gtk.FileChooserDialog` ✅
-- [x] **v5.5** — Persistência da última pasta escolhida ✅
-- [ ] **v5.6** — Diálogo de gestão de histórico (apagar entradas obsoletas)
-- [ ] **v5.6** — Thumbnail assíncrono (não bloquear UI)
-- [ ] **v5.7** — Modo batch: processar múltiplas pastas em fila
-- [ ] **v5.7** — Suporte a vídeos (extração de data via `ffmpeg`)
+- [ ] **v5.4** — Integração com `exifread` para extração fiável de datas em RAWs
+- [ ] **v5.4** — Corrigir filtro `file://` em URIs do Nautilus
+- [ ] **v5.4** — Escrita atómica do `historico.json` (via `os.replace`)
+- [ ] **v5.5** — Diálogo de gestão de histórico (apagar entradas obsoletas)
+- [ ] **v5.5** — Thumbnail assíncrono (não bloquear UI)
+- [ ] **v5.6** — Modo batch: processar múltiplas pastas em fila
+- [ ] **v5.6** — Suporte a vídeos (extração de data via `ffmpeg`)
 - [ ] **v6.0** — Versão standalone (fora do Nautilus) com drag-and-drop
 
 ---
@@ -338,7 +562,7 @@ Contribuições são bem-vindas, especialmente:
 
 Histórico completo de versões em [`CHANGELOG.md`](./CHANGELOG.md).
 
-Versão atual: **v5.5** (2024)
+Versão atual: **v5.3** (2024)
 
 ---
 

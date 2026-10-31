@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+# 1. Ligação simbólica global para o Nautilus (disponível para todos os utilizadores)
+if [ -d /usr/share/nautilus/scripts ]; then
+    ln -sf /usr/bin/chronos-arkhe "/usr/share/nautilus/scripts/Chronos Arkhe"
+fi
+
+# 2. Atualizar base de dados de aplicações e ícones do sistema
+if which update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+
+if which gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+
+exit 0

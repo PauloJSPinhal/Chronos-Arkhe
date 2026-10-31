@@ -1,0 +1,7 @@
+#!/bin/sh
+set -e
+
+# Remover atalho do Nautilus
+rm -f "/usr/share/nautilus/scripts/Chronos Arkhe"
+
+exit 0
