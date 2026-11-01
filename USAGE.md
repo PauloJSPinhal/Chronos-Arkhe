@@ -1,103 +1,100 @@
-# Chronos Arkhe v6.0 — Organizador de Fotos por Data
+# Chronos Arkhe v6.0 — Manual de Utilização
 
-Aplicação GTK3 para organizar automaticamente fotos por data de captura (EXIF). Suporta múltiplos formatos de imagem e RAWs, com integração nativa no Nautilus File Manager. Integra a suite fotográfica **Chronos** (*Arkhe*, *Nomos*, *Sfragis*, *Gnosis*).
+Aplicação GTK3 para organizar automaticamente fotografias em coleções por data de captura (EXIF). Suporta múltiplos formatos de imagem e RAWs, sidecars de edição e integração nativa no gestor de ficheiros **Nautilus**. Integra a suite fotográfica **Chronos** (*Arkhe*, *Nomos*, *Sfragis*, *Gnosis*).
 
-## 🚀 Novidades v6.0
+## 🚀 Destaques da v6.0
 
-- **Aplicação GTK3 completa** — Interface com navegador de ficheiros integrado
+- **Aplicação GTK3 completa** — Interface com navegador de ficheiros integrado, lista de seleção e botão **Selecionar Tudo**
+- **Diálogo por Coleção/Data com Preview** — Navegação `◀`/`▶` pelas fotos de cada data, auto-completar de Evento/Local e pré-visualização do nome da pasta
 - **Arquitetura de classes** — `ChronosArkheApp(Gtk.Window)`, padrão unificado da suite Chronos
-- **Processamento assíncrono** — Worker em thread separada; a UI nunca bloqueia
-- **Logging em tempo real** — Painel de log mostra cada passo da operação
-- **Progress bar** — Acompanhamento visual do progresso
-- **Cancelamento seguro** — Interrompe a operação a meio sem corromper ficheiros
-- **Botão Mover/Copiar** — Toggle entre copiar ficheiros (padrão) ou movê-los
-- **Preview de imagens** — Visualiza miniaturas das fotos selecionadas
-- **Configuração centralizada** — `~/.config/chronos/arkhe.json` (padrão XDG da suite)
-- **Integração Nautilus** — Script disponível no menu de contexto (clica direito)
+- **Processamento assíncrono** — Worker em thread separada com sincronização segura (`GLib.idle_add`)
+- **Logging e Progress Bar em tempo real** — Acompanhamento detalhado de cada coleção criada
+- **Cancelamento seguro** — Interrompe a operação sem corromper ficheiros
+- **Botão Mover/Copiar** — Alterna entre copiar ficheiros (padrão) ou movê-los
+- **Configuração centralizada XDG** — `~/.config/chronos/arkhe.json` (com migração automática do histórico v5.x)
+- **Integração Nautilus** — Disponível no menu de contexto (*Scripts → Chronos Arkhe*)
 
 ## 📦 Instalação
 
 ### Pré-requisitos
 
 ```bash
-# Python 3.7+
-sudo apt install python3 python3-pip python3-gi python3-gi-cairo gir1.2-gtk-3.0
+# Dependências principais (Debian / Ubuntu)
+sudo apt install python3 python3-gi python3-gi-cairo gir1.2-gtk-3.0 python3-pil
 
-# Dependências Python
-pip install Pillow exifread
-
-# Opcional: melhor suporte EXIF
-sudo apt install libimage-exiftool-perl
+# Recomendado para RAWs e EXIF avançado
+sudo apt install python3-exifread libimage-exiftool-perl
 ```
 
-### Instalar Chronos
+### Instalar Localmente (sem root)
 
 ```bash
 cd Chronos-Arkhe
-scripts/install.sh
+./scripts/install.sh
 ```
 
-O instalador (sem necessidade de root):
+O instalador:
 - Copia o binário para `~/.local/bin/chronos-arkhe`
-- Regista a aplicação no menu de aplicações (`~/.local/share/applications/`)
-- Instala o ícone em `~/.local/share/icons/hicolor/`
-- Cria ligação para o Nautilus em `~/.local/share/nautilus/scripts/Chronos Arkhe`
+- Regista a aplicação em `~/.local/share/applications/chronos-arkhe.desktop`
+- Instala o ícone vetorial em `~/.local/share/icons/hicolor/scalable/apps/chronos-arkhe.svg`
+- Cria a ligação para o Nautilus em `~/.local/share/nautilus/scripts/Chronos Arkhe`
 
-> 💡 **Alternativa rápida**: `scripts/run.sh` executa diretamente do código-fonte, com verificação de dependências.
+> 💡 **Execução direta**: `./scripts/run.sh` executa a partir do código-fonte verificando as dependências.
 >
-> 📦 **Pacote Debian**: `scripts/build-deb.sh` gera `build/chronos-arkhe_6.0.0_all.deb` para instalação ao nível do sistema.
+> 📦 **Pacote Debian**: `./scripts/build-deb.sh` gera `build/chronos-arkhe_6.0.0_all.deb`.
 
 ### Desinstalar
 
 ```bash
-scripts/uninstall.sh
+./scripts/uninstall.sh
 ```
 
 ## 🎯 Como Usar
 
 ### Modo Aplicação (Interface Gráfica)
 
-Procura "Chronos" no menu de aplicações ou execute:
+Procura por **"Chronos Arkhe"** no menu de aplicações ou executa:
 
 ```bash
 chronos-arkhe
 ```
 
-A interface permite:
-1. **Navegar e selecionar fotos** — Navegador de ficheiros integrado com preview
-2. **Escolher pasta de destino** — Botão "Procurar..." para selecionar onde organizar
+1. **Navegar e selecionar fotos (`OrigensFileBrowser`)** — Na barra lateral esquerda tens acesso direto às origens permitidas: **`Imagens (~/Imagens)`**, **`Transferências (~/Transferências)`**, **Pendrives/Cartões SD** (`/media/$USER`, `/run/media/$USER`) e **Câmaras USB** (`/run/user/$UID/gvfs`). Podes selecionar fotos individuais, selecionar uma subpasta, fazer duplo clique para navegar por subpastas ou clicar em **Selecionar Tudo**.
+2. **Escolher pasta de destino (em `~/Imagens`)** — Clica em **Procurar...** para escolher `~/Imagens` ou qualquer subpasta dentro de `~/Imagens` (inclui o botão **➕ Nova Subpasta** para criar novas subpastas).
 3. **Configurar opções**:
-   - ☑️ Pedir Evento e Local para cada data
-   - 🔄 Toggle entre Copiar (padrão) ou Mover ficheiros
-4. **Iniciar organização** — Botão "Iniciar Organização"
+   - ☑️ **Pedir Evento e Local para cada data (coleção)**
+   - 🔄 **Copiar (padrão)** ou **Mover ficheiros**
+   - 🛡️ **Origens e Excepções...** (gerir origens permitidas e pastas indesejadas)
+4. **Iniciar Organização** — Clica em **Iniciar Organização** e preenche o Evento e Local para cada data.
 
-### Modo Nautilus (Clica Direito)
+### Modo Nautilus (Menu de Contexto)
 
-1. Seleciona fotos no Nautilus
-2. Clica direito → **Scripts** → **Chronos Arkhe**
-3. Configura opções no diálogo (igual ao modo aplicação)
+1. Seleciona as fotos (ou uma pasta de fotos) no Nautilus.
+2. Clica com o botão direito → **Scripts** → **Chronos Arkhe**.
+3. As fotos aparecem automaticamente carregadas na aplicação; confirma o destino e clica em **Iniciar Organização**.
 
-> 💡 Se o script não aparecer, ativa-o com `scripts/enable-nautilus-script.sh` e reinicia o Nautilus (`killall nautilus`).
+> 💡 Se o script não aparecer no menu, ativa-o com `./scripts/enable-nautilus-script.sh` e reinicia o Nautilus (`nautilus -q`).
 
 ### Modo Linha de Comando
 
 ```bash
-# Uma ou mais fotos
+# Ficheiros específicos
 chronos-arkhe /caminho/para/foto1.jpg /caminho/para/foto2.jpg
 
-# Com glob
+# Com wildcard ou pasta inteira
 chronos-arkhe ~/Fotos/*.jpg
+chronos-arkhe ~/Fotos/CartaoSD/
 
-# Modo debug (mostra diagnóstico EXIF detalhado)
+# Modo debug (mostra diagnóstico EXIF detalhado no terminal)
 chronos-arkhe --debug ~/Fotos/*.jpg
 ```
 
 ## 📋 Formato de Organização
 
-As fotos são organizadas em pastas com o formato:
+As fotos são agrupadas por data de captura em pastas com o formato:
 
-```
-AAAAMMDD_Evento-Local/
+```text
+AAAAMMDD_Evento_Local/
 ├── foto1.jpg
 ├── foto1.xmp (sidecar, se existir)
 ├── foto2.jpg
@@ -105,181 +102,97 @@ AAAAMMDD_Evento-Local/
 ```
 
 **Exemplo:**
-```
-20240615_Casamento-Igreja/
+```text
+20260615_Casamento_Igreja-Matriz/
 ├── IMG_0001.jpg
 ├── IMG_0001.xmp
 ├── IMG_0002.jpg
-├── ...
+└── ...
 ```
 
-Os componentes são:
-- `AAAAMMDD` — Data de captura (EXIF DateTimeOriginal)
-- `Evento` — Texto livre (histórico reutilizável)
-- `Local` — Texto livre (histórico reutilizável)
-- Hífens como separador consistente
-- Underscores e espaços convertidos automaticamente
+Regras de formatação:
+- `AAAAMMDD` — Data de captura EXIF (`DateTimeOriginal` / `DateTimeDigitized`)
+- `Evento` — Nome do evento sanitizado (espaços e underscores internos convertidos em `-`, acentos preservados)
+- `Local` — Nome do local sanitizado (espaços e underscores internos convertidos em `-`, acentos preservados)
 
 ## 🔍 Extração EXIF
 
-Chronos tenta extrair a data de captura por ordem de prioridade:
+O **Chronos Arkhe** extrai a data de captura seguindo esta ordem de prioridade:
 
-1. **Pillow** — Rápido, suporta JPEG, PNG, TIFF, WebP
-2. **exifread** — Robusto para RAWs (Canon CR2, Nikon NEF, Sony ARW, etc.)
-3. **exiftool** — Fallback para EXIF exótico (comando externo, se instalado)
-4. **mtime** — Última opção (data de modificação do ficheiro)
+1. **Pillow (`getexif` + sub-IFD `0x8769`)** — Rápido e nativo para JPEG, PNG, TIFF e WebP
+2. **exifread** — Leitura direta de tags EXIF para formatos RAW (Canon CR2/CR3, Nikon NEF, Sony ARW, DNG, etc.)
+3. **exiftool** — Fallback externo para metadados EXIF não-padrão
+4. **mtime** — Último recurso (data de modificação do ficheiro no sistema de ficheiros)
 
-### Compatibilidade de RAWs
+## 📊 Sidecars Suportados
 
-Suportados:
-- Canon: CR2, CR3, CRW
-- Nikon: NEF, NRW
-- Sony: ARW, SR2, SRF
-- Fujifilm: RAF, RW2
-- Pentax: PEF, DNG
-- Olympus: ORF
-- E muitos mais (ver variável `IMAGE_EXTS` no código)
+Ficheiros de edição não-destrutiva associados (`nome.ext` ou `nome.jpg.ext`) são copiados/movidos em conjunto com a fotografia principal:
 
-## 📊 Sidecars
+- `*.xmp` — Darktable, Lightroom, Adobe Camera Raw
+- `*.pp3` — RawTherapee
+- `*.dop` — DxO PhotoLab
 
-Ficheiros de edição associados são movidos/copiados automaticamente:
+## 🔧 Configuração e Histórico
 
-- `*.xmp` — Metadados Darktable, Lightroom, Adobe
-- `*.pp3` — Presets RawTherapee
-- `*.dop` — Presets DxO PhotoLab
+A configuração e o histórico são guardados em:
 
-Exemplo: `foto.jpg` + `foto.jpg.xmp` são movidos juntos.
-
-## 🔧 Configuração
-
-Histórico de eventos e locais é armazenado em:
-
-```
+```text
 ~/.config/chronos/arkhe.json
 ```
 
 Formato:
 ```json
 {
+  "ultima_pasta": "/home/utilizador/Imagens",
+  "ultima_pasta_origem": "/home/utilizador/Imagens",
   "eventos": ["Casamento", "Férias", "Família"],
-  "locais": ["Igreja", "Praia", "Casa"],
-  "ultima_pasta": "/home/user/Fotos/2024"
+  "locais": ["Igreja Matriz", "Praia", "Casa"],
+  "restringir_origens": true,
+  "origens_permitidas": [
+    "/home/utilizador/Imagens",
+    "/home/utilizador/Transferências",
+    "/media/utilizador",
+    "/run/media/utilizador",
+    "/run/user/1000/gvfs"
+  ],
+  "pastas_excluidas": [
+    ".git",
+    ".cache",
+    ".local",
+    ".config",
+    ".Trash",
+    ".Trash-*",
+    "System Volume Information",
+    "$RECYCLE.BIN",
+    "LOST.DIR",
+    "node_modules",
+    "__pycache__",
+    "/proc",
+    "/sys",
+    "/dev"
+  ],
+  "ask_mode": true,
+  "usar_move": false
 }
 ```
 
-Edita diretamente para adicionar ou remover entradas.
+> **`restringir_origens` e `origens_permitidas`**: quando ativo (`true`), aceita fotos apenas de `~/Imagens`, `~/Transferências` (e respetivas subpastas), pendrives/cartões SD (`/media/$USER`, `/run/media/$USER`) e câmaras fotográficas USB (`/run/user/$UID/gvfs`), rejeitando todas as restantes pastas do sistema. A **Pasta de Destino** aceita exclusivamente pastas em `~/Imagens`.
+>
+> **`pastas_excluidas`**: lista de nomes de pastas (ou padrões glob como `.Trash-*`) e caminhos absolutos/com `~` onde a aplicação oculta e bloqueia a navegação e leitura de ficheiros (incluindo pastas de sistema dentro de cartões SD e pendrives). Tudo pode ser gerido na interface pelo botão **"🛡️ Origens e Excepções..."**.
 
-## ⚙️ Flags de Debug
-
-```bash
-chronos-arkhe --debug foto1.jpg foto2.jpg
-```
-
-Mostra:
-- Diagnóstico EXIF detalhado por ficheiro
-- Fontes usadas (Pillow, exifread, exiftool, mtime)
-- Datas agrupadas
-- Estatísticas de extração
-
-Útil para diagnosticar problemas com EXIF.
+> Se existir um ficheiro legado `~/.config/organizar_fotos/historico.json` (de versões 5.x), as listas de eventos, locais e última pasta são migradas automaticamente.
 
 ## 🐛 Resolução de Problemas
 
-### "Nenhuma foto válida selecionada"
+### "Seleciona pelo menos uma foto válida para organizar"
+- Seleciona ficheiros suportados (`.jpg`, `.png`, `.tiff`, `.cr2`, `.nef`, etc.) ou abre uma pasta que contenha fotografias e clica em **Selecionar Tudo**.
 
-- ✅ Seleciona ficheiros `.jpg`, `.png`, `.tiff`, `.cr2`, etc.
-- ✅ Verifica permissões de leitura
-- ✅ Se usar Nautilus, garante que a pasta tem fotos visíveis
+### Aviso "Todas as fotos foram agrupadas na mesma data"
+- Surge quando mais de 3 fotos recaem numa única data usando `mtime` (sem EXIF).
+- Verifica os metadados com `chronos-arkhe --debug foto.jpg` ou `exiftool -DateTimeOriginal foto.jpg`.
+- Instala `python3-exifread` e `libimage-exiftool-perl` para suporte completo a RAWs.
 
-### "Todas as fotos foram agrupadas na mesma data"
+## 📄 Licença e Contribuições
 
-Pode indicar problema com EXIF. Verifica com:
-
-```bash
-exiftool -DateTimeOriginal foto.jpg
-```
-
-Se vazio, tenta:
-- Instalar `exifread`: `pip install exifread`
-- Usar câmara ou software de edição para adicionar EXIF
-- Aceitar fallback para data de modificação do ficheiro
-
-### "EXIF não foi lido corretamente"
-
-Um aviso é mostrado se múltiplas fotos caem num único dia. Soluções:
-
-1. Instala `exifread` para melhor suporte RAW
-2. Instala `exiftool`: `sudo apt install libimage-exiftool-perl`
-3. Usa `chronos-arkhe --debug` para diagnóstico
-
-### Script Nautilus não aparece
-
-Garantir que a ligação foi criada corretamente:
-
-```bash
-ls -la ~/.local/share/nautilus/scripts/
-```
-
-Se não existir:
-- Ativa: `scripts/enable-nautilus-script.sh` (ou reinstala: `scripts/install.sh`)
-- Reinicia Nautilus: `killall nautilus ; nautilus &`
-
-## 📝 Exemplos
-
-### Organizar fotos de um evento
-
-```bash
-# Via aplicação
-chronos-arkhe
-# Seleciona pasta com fotos, choose "Copiar", define Evento="Casamento", Local="Igreja"
-
-# Via Nautilus
-# 1. Abre pasta com fotos
-# 2. Seleciona ficheiros
-# 3. Clica direito → Scripts → Chronos Arkhe
-```
-
-### Mover (em vez de copiar)
-
-```bash
-# Via aplicação
-# Abre Chronos → toggle para "Mover ficheiros" → iniciar
-
-# Via Nautilus
-# Toggle para "Mover ficheiros" antes de clicar OK
-```
-
-### Organizar com histórico reutilizável
-
-```bash
-# Primeira vez
-chronos-arkhe ~/Férias2024/*.jpg
-# Define Evento="Férias 2024" e Local="Algarve"
-# Fica armazenado em ~/.config/chronos/arkhe.json
-
-# Próxima vez
-chronos-arkhe ~/Férias2024/dia2/*.jpg
-# Evento e Local aparecem sugeridos (histórico)
-```
-
-## 🎨 Personalização
-
-Tema: a aplicação herda o tema GTK3 do sistema (light/dark).
-
-Para forçar tema dark:
-
-```bash
-GTK_THEME=Adwaita:dark chronos-arkhe
-```
-
-## 📄 Licença
-
-[Ver LICENSE](./LICENSE)
-
-## 🤝 Contribuições
-
-[Ver CONTRIBUTING.md](./CONTRIBUTING.md)
-
----
-
-**Desenvolvido com ❤️ para organizar fotos sem esforço.**
+- Licença: [LICENSE](./LICENSE)
+- Guia de Contribuição: [CONTRIBUTING.md](./CONTRIBUTING.md)

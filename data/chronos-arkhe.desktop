@@ -1,13 +1,16 @@
 [Desktop Entry]
 Type=Application
-Name=Chronos — Organizar Fotos
-Comment=Organiza fotos por data de captura
-Keywords=fotos;organizador;data;exif;
-Exec=chronos-arkhe
-Icon=image-x-generic
-Categories=Multimedia;Graphics;Photography;
+Name=Chronos Arkhe
+GenericName=Organizador de Fotos por Data
+Comment=Organiza fotografias em coleções por data de captura (EXIF)
+Keywords=fotos;fotografia;organizador;data;exif;coleções;chronos;arkhe;
+Exec=chronos-arkhe %F
+Icon=chronos-arkhe
+Categories=Graphics;Photography;GTK;
 Terminal=false
-MimeType=image/jpeg;image/png;image/tiff;image/x-canon-cr2;image/x-canon-crw;image/x-canon-cr3;image/x-nikon-nef;image/x-sony-arw;
+StartupNotify=true
+StartupWMClass=chronos-arkhe
+MimeType=image/jpeg;image/png;image/tiff;image/webp;image/x-canon-cr2;image/x-canon-crw;image/x-canon-cr3;image/x-nikon-nef;image/x-sony-arw;image/x-adobe-dng;inode/directory;
 
 # Nautilus integration
 X-Nautilus-Actions=true

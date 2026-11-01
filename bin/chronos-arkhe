@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Chronos Arkhe — Organizador de Fotos por Data
-Padrão: AAAAMMDD_Evento-Local
+Padrão: AAAAMMDD_Evento_Local
 Compatível: Debian 13 / GNOME / GTK3 / Pillow / PyGObject
 v6.0 — Refatorizado para padrão Chronos (classe Window + config centralizado)
 """
@@ -16,7 +16,9 @@ import datetime
 import urllib.parse
 import re
 import io
+import fnmatch
 import threading
+import subprocess
 
 try:
     from PIL import Image
@@ -28,10 +30,17 @@ try:
     import gi
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
-    from gi.repository import Gtk, Gdk, GObject, GLib, Pango, GdkPixbuf
+    from gi.repository import Gtk, Gdk, GObject, GLib, Gio, GdkPixbuf
 except ImportError:
     print("❌ PyGObject não instalado. Execute: sudo apt install python3-gi", file=sys.stderr)
     sys.exit(1)
+
+try:
+    gi.require_version("Pango", "1.0")
+    from gi.repository import Pango
+    HAS_PANGO = True
+except (ImportError, ValueError):
+    HAS_PANGO = False
 
 # Imports opcionais
 try:
@@ -40,11 +49,14 @@ try:
 except ImportError:
     HAS_EXIFREAD = False
 
+os.environ.setdefault("GTK_THEME", "Adwaita:dark")
+
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURAÇÃO CENTRALIZADA
+# CONFIGURAÇÃO CENTRALIZADA & HISTÓRICO
 # ─────────────────────────────────────────────────────────────────────────────
 CONFIG_DIR = pathlib.Path.home() / ".config" / "chronos"
 CONFIG_FILE = CONFIG_DIR / "arkhe.json"
+LEGACY_HISTORY_FILE = pathlib.Path.home() / ".config" / "organizar_fotos" / "historico.json"
 
 IMAGE_EXTS = {
     '.jpg', '.jpeg', '.png', '.tiff', '.tif', '.webp', '.bmp', '.gif',
@@ -53,30 +65,153 @@ IMAGE_EXTS = {
     '.rwl', '.sr2', '.srf', '.gpr', '.erf'
 }
 SIDECAR_EXTS = ('.xmp', '.pp3', '.dop')
+
+# Tags EXIF tentadas por ordem de prioridade:
+# 36867 = DateTimeOriginal (data real de captura)
+# 36868 = DateTimeDigitized (data de digitalização)
 EXIF_TAGS_PRIORIDADE = (36867, 36868)
+EXIF_IFD_TAG = 0x8769
+
+# Origens permitidas por defeito no Debian/GNOME:
+# ~/Imagens, ~/Transferências, Pendrives/Cartões SD (/media, /run/media) e Câmaras USB (/run/user/$UID/gvfs)
+_HOME_DIR = pathlib.Path.home()
+_USER_NAME = os.environ.get("USER") or _HOME_DIR.name
+_USER_UID = os.getuid()
+PASTA_IMAGENS_PADRAO = str(_HOME_DIR / "Imagens")
+PASTA_TRANSFERENCIAS_PADRAO = str(_HOME_DIR / "Transferências")
+ORIGENS_PERMITIDAS_PADRAO = [
+    PASTA_IMAGENS_PADRAO,
+    PASTA_TRANSFERENCIAS_PADRAO,
+    f"/media/{_USER_NAME}",
+    f"/run/media/{_USER_NAME}",
+    f"/run/user/{_USER_UID}/gvfs",
+]
+
+# Pastas indesejadas por defeito (nomes de pastas ou caminhos absolutos/com ~)
+PASTAS_EXCLUIDAS_PADRAO = [
+    ".git",
+    ".cache",
+    ".local",
+    ".config",
+    ".thumbnails",
+    ".Trash",
+    ".Trash-*",
+    ".Spotlight-V100",
+    ".fseventsd",
+    "System Volume Information",
+    "$RECYCLE.BIN",
+    "LOST.DIR",
+    "node_modules",
+    "__pycache__",
+    "venv",
+    ".venv",
+    "lost+found",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/var",
+    "/etc",
+    "/usr",
+    "/boot",
+    "/root",
+]
+
 
 def load_config():
-    """Carrega configuração do JSON ou padrões."""
+    """Carrega configuração de ~/.config/chronos/arkhe.json ou padrões, migrando histórico legado."""
     default_cfg = {
-        "ultima_pasta": str(pathlib.Path.home() / "Imagens"),
+        "ultima_pasta": PASTA_IMAGENS_PADRAO,
+        "ultima_pasta_origem": PASTA_IMAGENS_PADRAO,
         "eventos": [],
         "locais": [],
+        "restringir_origens": True,
+        "origens_permitidas": list(ORIGENS_PERMITIDAS_PADRAO),
+        "pastas_excluidas": list(PASTAS_EXCLUIDAS_PADRAO),
         "ask_mode": True,
         "usar_move": False,
     }
+
+    # Migrar dados do histórico legado (v5.x) como base se existir
+    if LEGACY_HISTORY_FILE.exists():
+        try:
+            with open(LEGACY_HISTORY_FILE, "r", encoding="utf-8") as f:
+                legacy = json.load(f)
+                if legacy.get("eventos"):
+                    default_cfg["eventos"] = list(legacy["eventos"])
+                if legacy.get("locais"):
+                    default_cfg["locais"] = list(legacy["locais"])
+                if legacy.get("ultima_pasta"):
+                    default_cfg["ultima_pasta"] = legacy["ultima_pasta"]
+        except Exception:
+            pass
+
+    precisa_gravar = not CONFIG_FILE.exists()
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
+                # Combinar listas de eventos e locais sem perder entradas legadas
+                eventos = sorted(set(default_cfg["eventos"]) | set(data.get("eventos", [])))
+                locais = sorted(set(default_cfg["locais"]) | set(data.get("locais", [])))
+                if "pastas_excluidas" not in data or "origens_permitidas" not in data:
+                    precisa_gravar = True
                 default_cfg.update(data)
+                default_cfg["eventos"] = eventos
+                default_cfg["locais"] = locais
         except Exception as e:
             print(f"⚠️ Erro ao ler config: {e}", file=sys.stderr)
+
+    # Saneamento automático da configuração:
+    # 1. Garantir que ~/Imagens e ~/Transferências estão nas origens_permitidas
+    origens = list(default_cfg.get("origens_permitidas") or ORIGENS_PERMITIDAS_PADRAO)
+    origens_norm = {os.path.abspath(os.path.expanduser(str(x).strip())) for x in origens if x}
+    for p_obrig in (PASTA_Transferencias_ := PASTA_TRANSFERENCIAS_PADRAO, PASTA_IMAGENS_PADRAO):
+        p_abs = os.path.abspath(os.path.expanduser(p_obrig))
+        if p_abs not in origens_norm:
+            origens.insert(0, p_obrig)
+            origens_norm.add(p_abs)
+            precisa_gravar = True
+    default_cfg["origens_permitidas"] = origens
+
+    # 2. Remover "/run" de pastas_excluidas se houver origens permitidas em /run/media ou /run/user/.../gvfs
+    excluidas = list(default_cfg.get("pastas_excluidas") or PASTAS_EXCLUIDAS_PADRAO)
+    if "/run" in excluidas and any(str(o).startswith("/run/") for o in origens):
+        excluidas = [x for x in excluidas if x != "/run"]
+        precisa_gravar = True
+    for padrao_sd in ("System Volume Information", "$RECYCLE.BIN", "LOST.DIR", ".Trash-*"):
+        if padrao_sd not in excluidas:
+            excluidas.append(padrao_sd)
+            precisa_gravar = True
+    default_cfg["pastas_excluidas"] = excluidas
+
+    # 3. Garantir que a pasta de destino (ultima_pasta) fica sempre dentro de ~/Imagens
+    dest_atual = os.path.abspath(os.path.expanduser(str(default_cfg.get("ultima_pasta") or PASTA_IMAGENS_PADRAO)))
+    raiz_img = os.path.abspath(PASTA_IMAGENS_PADRAO)
+    if not (dest_atual == raiz_img or dest_atual.startswith(raiz_img.rstrip(os.sep) + os.sep)):
+        default_cfg["ultima_pasta"] = PASTA_IMAGENS_PADRAO
+        precisa_gravar = True
+
+    # 4. Impedir que "/" fique gravado como ultima_pasta_origem
+    if default_cfg.get("ultima_pasta_origem") in ("/", "/run", "/media", None, ""):
+        default_cfg["ultima_pasta_origem"] = PASTA_IMAGENS_PADRAO
+        precisa_gravar = True
+
+    if precisa_gravar:
+        save_config(default_cfg)
+
     return default_cfg
+
 
 def save_config(cfg):
     """Grava configuração com escrita atómica."""
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        cfg["eventos"] = sorted(set(cfg.get("eventos", [])))
+        cfg["locais"] = sorted(set(cfg.get("locais", [])))
+        if "origens_permitidas" not in cfg or not isinstance(cfg["origens_permitidas"], list):
+            cfg["origens_permitidas"] = list(ORIGENS_PERMITIDAS_PADRAO)
+        if "pastas_excluidas" not in cfg or not isinstance(cfg["pastas_excluidas"], list):
+            cfg["pastas_excluidas"] = list(PASTAS_EXCLUIDAS_PADRAO)
         tmp = CONFIG_FILE.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
@@ -84,12 +219,29 @@ def save_config(cfg):
     except Exception as e:
         print(f"⚠️ Erro ao gravar config: {e}", file=sys.stderr)
 
+
+def load_history():
+    """Compatibilidade com API v5.x."""
+    cfg = load_config()
+    return cfg.get("eventos", []), cfg.get("locais", []), cfg.get("ultima_pasta")
+
+
+def save_history(eventos, locais, ultima_pasta=None):
+    """Compatibilidade com API v5.x."""
+    cfg = load_config()
+    cfg["eventos"] = sorted(set(eventos))
+    cfg["locais"] = sorted(set(locais))
+    if ultima_pasta:
+        cfg["ultima_pasta"] = ultima_pasta
+    save_config(cfg)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# UTILITÁRIOS
+# UTILITÁRIOS & EXTRAÇÃO EXIF
 # ─────────────────────────────────────────────────────────────────────────────
 
 def sanitize(text):
-    """Normaliza texto para pasta."""
+    """Normaliza texto para uso em nome de pasta."""
     if text is None:
         return None
     t = text.strip()
@@ -98,6 +250,7 @@ def sanitize(text):
     t = re.sub(r'[^\w-]', '', t, flags=re.UNICODE)
     t = re.sub(r'-+', '-', t)
     return t.strip('-') or "Indefinido"
+
 
 def image_to_pixbuf(filepath, max_size=280):
     """Gera thumbnail GdkPixbuf."""
@@ -118,6 +271,7 @@ def image_to_pixbuf(filepath, max_size=280):
             return loader.get_pixbuf()
     except Exception:
         return None
+
 
 def _parse_exif_date(dt_str):
     """Interpreta string EXIF em vários formatos."""
@@ -151,38 +305,142 @@ def _parse_exif_date(dt_str):
             continue
     return None
 
-def obter_data_exif(caminho):
-    """Extrai data EXIF com fallbacks."""
+
+def _exif_from_pillow(caminho):
+    """Extrai data de captura via Pillow (incluindo sub-IFD EXIF 0x8769 no Pillow 10+)."""
     try:
         with Image.open(caminho) as img:
             exif = img.getexif() if hasattr(img, 'getexif') else None
-            if exif:
-                for tag_id in EXIF_TAGS_PRIORIDADE:
-                    val = exif.get(tag_id)
-                    if val:
-                        dt = _parse_exif_date(val)
-                        if dt:
-                            return dt, False, 'pillow'
+            if not exif:
+                return None
+
+            # No Pillow 10+, DateTimeOriginal (36867) e DateTimeDigitized (36868)
+            # encontram-se na sub-IFD EXIF (0x8769)
+            exif_ifd = {}
+            if hasattr(exif, 'get_ifd'):
+                try:
+                    exif_ifd = exif.get_ifd(EXIF_IFD_TAG) or {}
+                except Exception:
+                    exif_ifd = {}
+
+            for tag_id in EXIF_TAGS_PRIORIDADE:
+                val = exif_ifd.get(tag_id) or exif.get(tag_id)
+                if val:
+                    dt = _parse_exif_date(val)
+                    if dt:
+                        return dt
+    except Exception:
+        return None
+    return None
+
+
+def _exif_from_exifread(caminho):
+    """Extrai data de captura via exifread — ideal para RAWs."""
+    if not HAS_EXIFREAD:
+        return None
+    try:
+        with open(caminho, 'rb') as f:
+            tags = exifread.process_file(f, details=False, stop_tag='EXIF DateTimeOriginal')
+        for key in ('EXIF DateTimeOriginal', 'EXIF DateTimeDigitized', 'Image DateTime'):
+            val = tags.get(key)
+            if val:
+                dt = _parse_exif_date(str(val))
+                if dt:
+                    return dt
     except Exception:
         pass
+    return None
+
+
+def _exif_from_exiftool(caminho):
+    """Fallback para o binário externo 'exiftool'."""
+    if not shutil.which('exiftool'):
+        return None
+    try:
+        result = subprocess.run(
+            ['exiftool', '-s3', '-DateTimeOriginal', '-DateTimeDigitized', caminho],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                dt = _parse_exif_date(line)
+                if dt:
+                    return dt
+    except Exception:
+        pass
+    return None
+
+
+def obter_data_exif(caminho):
+    """Extrai data EXIF com fallbacks: Pillow -> exifread -> exiftool -> mtime."""
+    dt = _exif_from_pillow(caminho)
+    if dt:
+        return dt, False, 'pillow'
+
+    dt = _exif_from_exifread(caminho)
+    if dt:
+        return dt, False, 'exifread'
+
+    dt = _exif_from_exiftool(caminho)
+    if dt:
+        return dt, False, 'exiftool'
+
+    return datetime.datetime.fromtimestamp(os.path.getmtime(caminho)), True, 'mtime'
+
+
+def _diagnostico_exif(caminho):
+    """Diagnóstico detalhado para um ficheiro em modo --debug."""
+    print(f"\n── {os.path.basename(caminho)} ──")
+    print(f"   Caminho: {caminho}")
+
+    try:
+        with Image.open(caminho) as img:
+            pillow_exif = img.getexif() if hasattr(img, 'getexif') else None
+            print(f"   Pillow: getexif()={'OK' if pillow_exif else 'VAZIO/NONE'}")
+            if pillow_exif:
+                exif_ifd = pillow_exif.get_ifd(EXIF_IFD_TAG) if hasattr(pillow_exif, 'get_ifd') else {}
+                for tid, name in [(36867, 'DateTimeOriginal'),
+                                  (36868, 'DateTimeDigitized'),
+                                  (306, 'DateTime')]:
+                    val = (exif_ifd or {}).get(tid) or pillow_exif.get(tid)
+                    print(f"      Tag {tid} ({name}): {val!r}")
+    except Exception as e:
+        print(f"   Pillow: EXCEÇÃO — {type(e).__name__}: {e}")
 
     if HAS_EXIFREAD:
         try:
             with open(caminho, 'rb') as f:
                 tags = exifread.process_file(f, details=False, stop_tag='EXIF DateTimeOriginal')
-            for key in ('EXIF DateTimeOriginal', 'EXIF DateTimeDigitized'):
-                val = tags.get(key)
-                if val:
-                    dt = _parse_exif_date(str(val))
-                    if dt:
-                        return dt, False, 'exifread'
-        except Exception:
-            pass
+            dt_orig = tags.get('EXIF DateTimeOriginal')
+            dt_dig = tags.get('EXIF DateTimeDigitized')
+            dt_img = tags.get('Image DateTime')
+            print(f"   exifread: DateTimeOriginal={dt_orig!r}, Digitized={dt_dig!r}, Image={dt_img!r}")
+        except Exception as e:
+            print(f"   exifread: EXCEÇÃO — {type(e).__name__}: {e}")
+    else:
+        print("   exifread: NÃO INSTALADO (pip install exifread)")
 
-    return datetime.datetime.fromtimestamp(os.path.getmtime(caminho)), True, 'mtime'
+    if shutil.which('exiftool'):
+        try:
+            result = subprocess.run(
+                ['exiftool', '-s3', '-DateTimeOriginal', '-DateTimeDigitized', caminho],
+                capture_output=True, text=True, timeout=10
+            )
+            print(f"   exiftool: returncode={result.returncode}, stdout={result.stdout.strip()!r}")
+        except Exception as e:
+            print(f"   exiftool: EXCEÇÃO — {type(e).__name__}: {e}")
+    else:
+        print("   exiftool: NÃO INSTALADO (sudo apt install libimage-exiftool-perl)")
+
+    dt, used_fb, fonte = obter_data_exif(caminho)
+    print(f"   → Resultado: {dt.strftime('%Y-%m-%d %H:%M:%S')} (fonte={fonte}, fallback_mtime={used_fb})")
+
 
 def get_sidecars(main_file):
-    """Retorna sidecars associados."""
+    """Retorna sidecars associados (.xmp, .pp3, .dop)."""
     src_dir = os.path.dirname(main_file)
     stem = os.path.splitext(os.path.basename(main_file))[0]
     ext = os.path.splitext(os.path.basename(main_file))[1]
@@ -192,33 +450,820 @@ def get_sidecars(main_file):
         candidates.add(os.path.join(src_dir, f"{stem}{ext}{sc_ext}"))
     return [c for c in candidates if os.path.isfile(c)]
 
+
+def _obter_lista_excluidas(cfg_ou_lista=None):
+    """Obtém a lista de pastas excluídas a partir da config ou lista."""
+    if isinstance(cfg_ou_lista, list):
+        return cfg_ou_lista
+    if isinstance(cfg_ou_lista, dict):
+        return (
+            cfg_ou_lista.get("pastas_excluidas")
+            or cfg_ou_lista.get("pastas_ignoradas")
+            or cfg_ou_lista.get("excepcoes")
+            or list(PASTAS_EXCLUIDAS_PADRAO)
+        )
+    cfg = load_config()
+    return _obter_lista_excluidas(cfg)
+
+
+def is_pasta_excluida(caminho, pastas_excluidas=None):
+    """Verifica se um caminho (pasta ou ficheiro) pertence a uma pasta indesejada/excluída."""
+    if not caminho:
+        return False
+
+    regras = _obter_lista_excluidas(pastas_excluidas)
+    if not regras:
+        return False
+
+    caminho_abs = os.path.abspath(os.path.expanduser(str(caminho)))
+    # Se for um ficheiro de imagem existente, avaliamos a pasta onde reside e o próprio caminho
+    pasta_alvo = os.path.dirname(caminho_abs) if os.path.isfile(caminho_abs) else caminho_abs
+    partes_pasta = pathlib.Path(pasta_alvo).parts
+    nome_base = os.path.basename(caminho_abs)
+
+    for regra in regras:
+        if not regra:
+            continue
+        r = str(regra).strip()
+        if not r:
+            continue
+
+        # 1. Regra de caminho absoluto ou relativo à home (~)
+        if r.startswith("/") or r.startswith("~"):
+            r_abs = os.path.abspath(os.path.expanduser(r))
+            if caminho_abs == r_abs or caminho_abs.startswith(r_abs.rstrip(os.sep) + os.sep):
+                return True
+            if pasta_alvo == r_abs or pasta_alvo.startswith(r_abs.rstrip(os.sep) + os.sep):
+                return True
+        else:
+            # 2. Regra de nome de pasta ou padrão glob (ex: ".git", "node_modules", ".Trash*")
+            r_clean = r.strip("/")
+            if fnmatch.fnmatch(nome_base, r_clean):
+                return True
+            for parte in partes_pasta:
+                if parte in ("/", ""):
+                    continue
+                if fnmatch.fnmatch(parte, r_clean):
+                    return True
+
+    return False
+
+
+def is_origem_permitida(caminho, cfg_ou_lista=None, permitir_ancestrais=False):
+    """Verifica se uma pasta/ficheiro de origem é permitido pelas regras (origens_permitidas + pastas_excluidas)."""
+    if not caminho:
+        return False
+    if is_pasta_excluida(caminho, cfg_ou_lista):
+        return False
+
+    if not isinstance(cfg_ou_lista, dict):
+        return True
+
+    if not cfg_ou_lista.get("restringir_origens", False):
+        return True
+
+    origens = cfg_ou_lista.get("origens_permitidas") or list(ORIGENS_PERMITIDAS_PADRAO)
+    if not origens:
+        return True
+
+    caminho_abs = os.path.abspath(os.path.expanduser(str(caminho)))
+    # Nunca aceitar "/" nem "/run" como origem válida quando restringir_origens está ativo
+    if caminho_abs in ("/", "/run", "/run/user"):
+        return False
+
+    for orig in origens:
+        if not orig:
+            continue
+        o_str = str(orig).strip()
+        if not o_str:
+            continue
+        orig_abs = os.path.abspath(os.path.expanduser(o_str))
+        # Dentro da origem permitida (ou a própria pasta de origem)
+        if caminho_abs == orig_abs or caminho_abs.startswith(orig_abs.rstrip(os.sep) + os.sep):
+            return True
+
+    return False
+
+
+def is_destino_permitido(caminho, cfg_ou_lista=None):
+    """Verifica se uma pasta de destino está dentro de ~/Imagens e fora de pastas_excluidas."""
+    if not caminho:
+        return False
+    if is_pasta_excluida(caminho, cfg_ou_lista):
+        return False
+    caminho_abs = os.path.abspath(os.path.expanduser(str(caminho)))
+    raiz_img = os.path.abspath(PASTA_IMAGENS_PADRAO)
+    return caminho_abs == raiz_img or caminho_abs.startswith(raiz_img.rstrip(os.sep) + os.sep)
+
+
 def _normalizar_uri(u):
-    """Converte URI file:// ou path relativo."""
+    """Converte URI file:// ou path relativo em path absoluto."""
     if u.startswith("file://"):
         return urllib.parse.unquote(u[7:])
     return os.path.abspath(u)
+
+
+def _expandir_caminhos(caminhos, cfg_ou_lista=None):
+    """Recebe lista de ficheiros e/ou pastas e devolve apenas ficheiros de imagem válidos nas origens permitidas."""
+    resultado = []
+    vistos = set()
+    for p in caminhos or []:
+        if not p:
+            continue
+        p_abs = _normalizar_uri(p)
+        if not is_origem_permitida(p_abs, cfg_ou_lista):
+            continue
+        if os.path.isfile(p_abs):
+            if os.path.splitext(p_abs)[1].lower() in IMAGE_EXTS and p_abs not in vistos:
+                resultado.append(p_abs)
+                vistos.add(p_abs)
+        elif os.path.isdir(p_abs):
+            try:
+                for nome in sorted(os.listdir(p_abs)):
+                    sub = os.path.join(p_abs, nome)
+                    if not is_origem_permitida(sub, cfg_ou_lista):
+                        continue
+                    if os.path.isfile(sub) and os.path.splitext(sub)[1].lower() in IMAGE_EXTS:
+                        if sub not in vistos:
+                            resultado.append(sub)
+                            vistos.add(sub)
+            except OSError:
+                pass
+    return resultado
+
+
+def _formatar_tamanho(num_bytes):
+    """Formata bytes em KB / MB / GB legíveis."""
+    try:
+        n = float(num_bytes)
+        for unidade in ("B", "KB", "MB", "GB"):
+            if n < 1024.0 or unidade == "GB":
+                return f"{int(n)} B" if unidade == "B" else f"{n:.1f} {unidade}"
+            n /= 1024.0
+    except Exception:
+        pass
+    return ""
+
+
+class OrigensFileBrowser(Gtk.Box):
+    """
+    Navegador de origens e fotos que substitui o Gtk.FileChooserWidget.
+    Garante que pastas proibidas (pastas_excluidas) e pastas fora de origens_permitidas
+    NUNCA aparecem na barra lateral nem na listagem de ficheiros/pastas.
+    """
+    def __init__(self, get_cfg_callable, on_selection_changed=None, on_folder_changed=None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self._get_cfg = get_cfg_callable
+        self._on_selection_changed_cb = on_selection_changed
+        self._on_folder_changed_cb = on_folder_changed
+        self._current_folder = None
+        self._history = []
+        self._modo_filtro = "imagens"  # "imagens" ou "todos"
+        self._updating_sidebar = False
+
+        # 1. Barra de topo (Navegação: Voltar, Subir, Atualizar, Caminho Atual)
+        nav_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.btn_back = Gtk.Button(label="◀")
+        self.btn_back.set_tooltip_text("Voltar à pasta anterior")
+        self.btn_back.set_sensitive(False)
+        self.btn_back.connect("clicked", self._on_back)
+
+        self.btn_up = Gtk.Button(label="⬆ Subir")
+        self.btn_up.set_tooltip_text("Subir para a pasta acima (dentro da origem permitida)")
+        self.btn_up.set_sensitive(False)
+        self.btn_up.connect("clicked", self._on_up)
+
+        self.btn_refresh = Gtk.Button(label="🔄")
+        self.btn_refresh.set_tooltip_text("Atualizar dispositivos e pastas")
+        self.btn_refresh.connect("clicked", lambda _: self.refresh())
+
+        self.lbl_caminho = Gtk.Label(label="")
+        self.lbl_caminho.set_xalign(0)
+        self.lbl_caminho.set_selectable(True)
+        if HAS_PANGO:
+            try:
+                self.lbl_caminho.set_ellipsize(Pango.EllipsizeMode.START)
+            except Exception:
+                pass
+
+        nav_bar.pack_start(self.btn_back, False, False, 0)
+        nav_bar.pack_start(self.btn_up, False, False, 0)
+        nav_bar.pack_start(self.btn_refresh, False, False, 0)
+        nav_bar.pack_start(self.lbl_caminho, True, True, 4)
+        self.pack_start(nav_bar, False, False, 0)
+
+        # 2. Painel dividido: Barra lateral de Dispositivos/Origens (esquerda) + Lista de Pastas/Fotos (direita)
+        hpaned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.pack_start(hpaned, True, True, 0)
+
+        # 2a. Barra lateral: apenas Origens Permitidas e Dispositivos Montados
+        sidebar_frame = Gtk.Frame()
+        sidebar_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=4)
+        self.lbl_sidebar_titulo = Gtk.Label(label="📍 Dispositivos / Origens")
+        self.lbl_sidebar_titulo.set_xalign(0)
+        sidebar_vbox.pack_start(self.lbl_sidebar_titulo, False, False, 2)
+
+        # (icon_name, label, path)
+        self.store_origens = Gtk.ListStore(str, str, str)
+        self.tree_origens = Gtk.TreeView(model=self.store_origens)
+        self.tree_origens.set_headers_visible(False)
+
+        col_orig = Gtk.TreeViewColumn("Origem")
+        cell_icon_orig = Gtk.CellRendererPixbuf()
+        cell_txt_orig = Gtk.CellRendererText()
+        col_orig.pack_start(cell_icon_orig, False)
+        col_orig.pack_start(cell_txt_orig, True)
+        col_orig.add_attribute(cell_icon_orig, "icon-name", 0)
+        col_orig.add_attribute(cell_txt_orig, "text", 1)
+        self.tree_origens.append_column(col_orig)
+        self.tree_origens.get_selection().connect("changed", self._on_sidebar_selected)
+
+        scroll_origens = Gtk.ScrolledWindow()
+        scroll_origens.set_size_request(185, -1)
+        scroll_origens.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll_origens.add(self.tree_origens)
+        sidebar_vbox.pack_start(scroll_origens, True, True, 0)
+        sidebar_frame.add(sidebar_vbox)
+        hpaned.pack1(sidebar_frame, resize=False, shrink=False)
+
+        # 2b. Área central: Stack com página "lista" e página "vazio"
+        self.stack = Gtk.Stack()
+
+        # Página "lista": TreeView de pastas e ficheiros permitidos
+        # (icon_name, nome, tamanho_str, mod_str, full_path, is_dir)
+        self.store_files = Gtk.ListStore(str, str, str, str, str, bool)
+        self.tree_files = Gtk.TreeView(model=self.store_files)
+        self.tree_files.set_rubber_banding(True)
+        sel = self.tree_files.get_selection()
+        sel.set_mode(Gtk.SelectionMode.MULTIPLE)
+        sel.connect("changed", self._on_files_selection_changed)
+        self.tree_files.connect("row-activated", self._on_row_activated)
+
+        col_nome = Gtk.TreeViewColumn("Nome")
+        col_nome.set_resizable(True)
+        col_nome.set_expand(True)
+        cell_icon = Gtk.CellRendererPixbuf()
+        cell_nome = Gtk.CellRendererText()
+        col_nome.pack_start(cell_icon, False)
+        col_nome.pack_start(cell_nome, True)
+        col_nome.add_attribute(cell_icon, "icon-name", 0)
+        col_nome.add_attribute(cell_nome, "text", 1)
+        self.tree_files.append_column(col_nome)
+
+        col_tam = Gtk.TreeViewColumn("Tamanho", Gtk.CellRendererText(), text=2)
+        col_tam.set_resizable(True)
+        self.tree_files.append_column(col_tam)
+
+        col_mod = Gtk.TreeViewColumn("Modificado", Gtk.CellRendererText(), text=3)
+        col_mod.set_resizable(True)
+        self.tree_files.append_column(col_mod)
+
+        scroll_files = Gtk.ScrolledWindow()
+        scroll_files.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll_files.add(self.tree_files)
+        self.stack.add_named(scroll_files, "lista")
+
+        # Página "vazio": exibida quando não há dispositivos externos ligados
+        empty_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=24)
+        empty_box.set_valign(Gtk.Align.CENTER)
+        empty_box.set_halign(Gtk.Align.CENTER)
+        img_empty = Gtk.Image.new_from_icon_name("drive-removable-media-symbolic", Gtk.IconSize.DIALOG)
+        self.lbl_empty_title = Gtk.Label(label="🔌 Nenhum dispositivo externo detetado")
+        self.lbl_empty_desc = Gtk.Label(
+            label=(
+                "Ligue uma Pendrive, insira um Cartão de Memória (SD)\n"
+                "ou ligue a Máquina Fotográfica por cabo USB.\n\n"
+                "Todas as pastas internas do PC estão ocultas e bloqueadas."
+            )
+        )
+        self.lbl_empty_desc.set_justify(Gtk.Justification.CENTER)
+        self.lbl_empty_desc.set_line_wrap(True)
+        btn_empty_refresh = Gtk.Button(label="🔄 Verificar Dispositivos Ligados")
+        btn_empty_refresh.connect("clicked", lambda _: self.refresh())
+
+        empty_box.pack_start(img_empty, False, False, 0)
+        empty_box.pack_start(self.lbl_empty_title, False, False, 0)
+        empty_box.pack_start(self.lbl_empty_desc, False, False, 0)
+        empty_box.pack_start(btn_empty_refresh, False, False, 4)
+        self.stack.add_named(empty_box, "vazio")
+
+        right_frame = Gtk.Frame()
+        right_frame.add(self.stack)
+        hpaned.pack2(right_frame, resize=True, shrink=False)
+        hpaned.set_position(195)
+
+        # 3. Barra inferior: Filtro de ficheiros
+        bottom_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.combo_filter = Gtk.ComboBoxText()
+        self.combo_filter.append("imagens", "Imagens e RAWs (origens permitidas)")
+        self.combo_filter.append("todos", "Todos os ficheiros (origens permitidas)")
+        self.combo_filter.set_active_id("imagens")
+        self.combo_filter.connect("changed", self._on_filter_changed)
+        bottom_bar.pack_end(self.combo_filter, False, False, 0)
+        self.pack_start(bottom_bar, False, False, 0)
+
+        # 4. Monitorizar montagem/desmontagem automática de pendrives, cartões SD e câmaras USB
+        try:
+            self._vol_monitor = Gio.VolumeMonitor.get()
+            for sig in ("mount-added", "mount-removed", "volume-added", "volume-removed"):
+                self._vol_monitor.connect(sig, lambda *_a: GLib.idle_add(self._on_volume_event))
+        except Exception:
+            self._vol_monitor = None
+
+    def _on_volume_event(self):
+        self.refresh()
+        return False
+
+    def _descobrir_origens_e_dispositivos(self):
+        """
+        Devolve lista de tuplos (icon_name, label, path) para:
+        - ~/Imagens e ~/Transferências
+        - Dispositivos montados em /media/$USER, /run/media/$USER e /run/user/$UID/gvfs (pendrives, cartões SD, câmaras USB)
+        """
+        cfg = self._get_cfg()
+        restringir = cfg.get("restringir_origens", True)
+        origens_cfg = cfg.get("origens_permitidas") or list(ORIGENS_PERMITIDAS_PADRAO)
+
+        itens = []
+        vistos = set()
+
+        def _adicionar_item(icone, nome, caminho):
+            c_abs = os.path.abspath(os.path.expanduser(str(caminho)))
+            if c_abs in vistos:
+                return
+            if not is_origem_permitida(c_abs, cfg):
+                return
+            vistos.add(c_abs)
+            itens.append((icone, nome, c_abs))
+
+        # 1. Pastas locais permitidas de origem: ~/Imagens e ~/Transferências
+        for pasta_fixa, nome_fixo, icone_fixo in [
+            (PASTA_IMAGENS_PADRAO, "Imagens (~/Imagens)", "folder-pictures-symbolic"),
+            (PASTA_TRANSFERENCIAS_PADRAO, "Transferências (~/Transferências)", "folder-download-symbolic"),
+        ]:
+            if os.path.isdir(pasta_fixa) and is_origem_permitida(pasta_fixa, cfg):
+                _adicionar_item(icone_fixo, nome_fixo, pasta_fixa)
+
+        # 2. Procurar dispositivos montados dentro das raízes de média (/media/user/*, /run/media/user/*, /run/user/1000/gvfs/*)
+        for orig in origens_cfg:
+            orig_abs = os.path.abspath(os.path.expanduser(str(orig).strip()))
+            if not os.path.isdir(orig_abs) or not is_origem_permitida(orig_abs, cfg):
+                continue
+            eh_raiz_media = (
+                orig_abs.startswith("/media/")
+                or orig_abs.startswith("/run/media/")
+                or orig_abs.endswith("/gvfs")
+            )
+            if not eh_raiz_media:
+                continue
+            try:
+                for entrada in sorted(os.scandir(orig_abs), key=lambda e: e.name.lower()):
+                    if not entrada.is_dir():
+                        continue
+                    if is_pasta_excluida(entrada.path, cfg):
+                        continue
+                    eh_gvfs = "/gvfs" in orig_abs or "gphoto2" in entrada.name or "mtp" in entrada.name
+                    icone = "camera-photo-symbolic" if eh_gvfs else "drive-removable-media-symbolic"
+                    nome_legivel = entrada.name
+                    if nome_legivel.startswith("gphoto2:host="):
+                        nome_legivel = "Câmara: " + urllib.parse.unquote(nome_legivel.split("=", 1)[1])
+                    elif nome_legivel.startswith("mtp:host="):
+                        nome_legivel = "Dispositivo: " + urllib.parse.unquote(nome_legivel.split("=", 1)[1])
+                    _adicionar_item(icone, nome_legivel, entrada.path)
+            except OSError:
+                pass
+
+        # 3. Verificar montagens GIO (pendrives/SD/câmaras) que estejam dentro das origens permitidas
+        if self._vol_monitor is not None:
+            try:
+                for mount in self._vol_monitor.get_mounts():
+                    root = mount.get_root()
+                    caminho_m = root.get_path() if root else None
+                    if caminho_m and os.path.isdir(caminho_m):
+                        _adicionar_item("drive-removable-media-symbolic", mount.get_name(), caminho_m)
+            except Exception:
+                pass
+
+        # 4. Adicionar outras pastas específicas que o utilizador tenha configurado em origens_permitidas
+        for orig in origens_cfg:
+            orig_abs = os.path.abspath(os.path.expanduser(str(orig).strip()))
+            if not os.path.isdir(orig_abs) or not is_origem_permitida(orig_abs, cfg):
+                continue
+            eh_raiz_media = (
+                orig_abs.startswith("/media/")
+                or orig_abs.startswith("/run/media/")
+                or orig_abs.endswith("/gvfs")
+            )
+            if eh_raiz_media:
+                continue
+            nome_base = os.path.basename(orig_abs) or orig_abs
+            _adicionar_item("folder-symbolic", nome_base, orig_abs)
+
+        # 5. Apenas se restringir_origens estiver DESATIVADO, mostrar Pasta Pessoal e Documentos
+        if not restringir:
+            home = pathlib.Path.home()
+            cand_doc = home / "Documentos"
+            if cand_doc.is_dir():
+                _adicionar_item("folder-documents-symbolic", "Documentos", str(cand_doc))
+            _adicionar_item("user-home-symbolic", "Pasta Pessoal", str(home))
+
+        return itens
+
+    def refresh(self):
+        """Recarrega a barra lateral de origens/dispositivos e a listagem da pasta atual."""
+        cfg = self._get_cfg()
+        restringir = cfg.get("restringir_origens", True)
+        self.lbl_sidebar_titulo.set_label(
+            "📍 Origens Permitidas" if restringir else "📍 Locais Permitidos"
+        )
+
+        itens_sidebar = self._descobrir_origens_e_dispositivos()
+        self._updating_sidebar = True
+        try:
+            self.store_origens.clear()
+            for icone, nome, caminho in itens_sidebar:
+                self.store_origens.append([icone, nome, caminho])
+        finally:
+            self._updating_sidebar = False
+
+        # Validar se a pasta atual continua a existir e a ser permitida
+        if (
+            self._current_folder
+            and os.path.isdir(self._current_folder)
+            and is_origem_permitida(self._current_folder, cfg)
+        ):
+            self._carregar_pasta(self._current_folder, adicionar_historico=False)
+        else:
+            # Escolher o primeiro dispositivo montado (preferindo dispositivos concretos a pastas-mãe vazias)
+            melhor_pasta = None
+            for _icone, _nome, caminho in itens_sidebar:
+                if os.path.isdir(caminho) and is_origem_permitida(caminho, cfg):
+                    melhor_pasta = caminho
+                    break
+            self._carregar_pasta(melhor_pasta, adicionar_historico=False)
+
+    def _carregar_pasta(self, caminho, adicionar_historico=True):
+        cfg = self._get_cfg()
+        if not caminho or not os.path.isdir(caminho) or not is_origem_permitida(caminho, cfg):
+            self._current_folder = None
+            self.store_files.clear()
+            self.lbl_caminho.set_label("🔌 A aguardar dispositivo (Pendrive, Cartão SD ou Câmara USB)...")
+            self.lbl_empty_title.set_label("🔌 Nenhum dispositivo externo detetado")
+            origens_txt = ", ".join(cfg.get("origens_permitidas") or ORIGENS_PERMITIDAS_PADRAO)
+            self.lbl_empty_desc.set_label(
+                "Ligue uma Pendrive, insira um Cartão de Memória (SD)\n"
+                "ou ligue a Máquina Fotográfica por cabo USB.\n\n"
+                f"Origens autorizadas: {origens_txt}\n"
+                "Todas as outras pastas do sistema estão rejeitadas."
+            )
+            self.stack.set_visible_child_name("vazio")
+            self.btn_up.set_sensitive(False)
+            self.btn_back.set_sensitive(bool(self._history))
+            if self._on_selection_changed_cb:
+                self._on_selection_changed_cb(self)
+            return
+
+        caminho_abs = os.path.abspath(caminho)
+        if adicionar_historico and self._current_folder and self._current_folder != caminho_abs:
+            self._history.append(self._current_folder)
+
+        self._current_folder = caminho_abs
+        self.lbl_caminho.set_label(f"📂 {caminho_abs}")
+
+        # Só permitir subir (⬆) se a pasta-mãe também for uma origem permitida
+        pasta_pai = os.path.dirname(caminho_abs)
+        pode_subir = (
+            pasta_pai != caminho_abs
+            and is_origem_permitida(pasta_pai, cfg)
+        )
+        self.btn_up.set_sensitive(pode_subir)
+        self.btn_back.set_sensitive(bool(self._history))
+
+        # Listar apenas subpastas e ficheiros permitidos (excluindo pastas_excluidas)
+        pastas = []
+        ficheiros = []
+        try:
+            for entry in os.scandir(caminho_abs):
+                nome = entry.name
+                # Ocultar ficheiros/pastas começados por '.' no modo imagens
+                if self._modo_filtro == "imagens" and nome.startswith("."):
+                    continue
+                if is_pasta_excluida(entry.path, cfg):
+                    continue
+                if not is_origem_permitida(entry.path, cfg):
+                    continue
+
+                try:
+                    st = entry.stat()
+                    mod_str = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+                except OSError:
+                    st = None
+                    mod_str = ""
+
+                if entry.is_dir():
+                    pastas.append(("folder-symbolic", nome, "Pasta", mod_str, entry.path, True))
+                elif entry.is_file():
+                    ext = os.path.splitext(nome)[1].lower()
+                    if self._modo_filtro == "imagens" and ext not in IMAGE_EXTS:
+                        continue
+                    icone_f = "image-x-generic-symbolic" if ext in IMAGE_EXTS else "text-x-generic-symbolic"
+                    tam_str = _formatar_tamanho(st.st_size) if st else ""
+                    ficheiros.append((icone_f, nome, tam_str, mod_str, entry.path, False))
+        except OSError:
+            pass
+
+        pastas.sort(key=lambda x: x[1].lower())
+        ficheiros.sort(key=lambda x: x[1].lower())
+
+        self.store_files.clear()
+        for row in pastas + ficheiros:
+            self.store_files.append(list(row))
+
+        # Se estamos numa raiz de média amovível vazia (ex: /media/paulo ou /run/user/1000/gvfs sem dispositivos ligados)
+        eh_raiz_media_vazia = (
+            not pastas
+            and not ficheiros
+            and (
+                caminho_abs.startswith("/media/")
+                or caminho_abs.startswith("/run/media/")
+                or caminho_abs.endswith("/gvfs")
+            )
+        )
+        if eh_raiz_media_vazia:
+            self.lbl_empty_title.set_label("🔌 Nenhum dispositivo montado nesta origem")
+            self.lbl_empty_desc.set_label(
+                f"A localização '{caminho_abs}' não tem dispositivos montados neste momento.\n"
+                "Ligue uma Pendrive, Cartão de Memória (SD) ou Câmara USB, ou escolha\n"
+                "'Imagens (~/Imagens)' ou 'Transferências (~/Transferências)' na barra lateral."
+            )
+            self.stack.set_visible_child_name("vazio")
+        else:
+            self.stack.set_visible_child_name("lista")
+
+        # Sincronizar seleção na barra lateral
+        self._updating_sidebar = True
+        try:
+            sel_side = self.tree_origens.get_selection()
+            sel_side.unselect_all()
+            for row in self.store_origens:
+                if row[2] == caminho_abs:
+                    sel_side.select_iter(row.iter)
+                    break
+        finally:
+            self._updating_sidebar = False
+
+        if self._on_folder_changed_cb:
+            self._on_folder_changed_cb(self)
+        if self._on_selection_changed_cb:
+            self._on_selection_changed_cb(self)
+
+    def _on_sidebar_selected(self, selection):
+        if self._updating_sidebar:
+            return
+        model, treeiter = selection.get_selected()
+        if treeiter is not None:
+            caminho = model[treeiter][2]
+            if caminho and caminho != self._current_folder:
+                self._carregar_pasta(caminho, adicionar_historico=True)
+
+    def _on_row_activated(self, treeview, path, _column):
+        row = self.store_files[path]
+        caminho = row[4]
+        eh_dir = row[5]
+        if eh_dir and os.path.isdir(caminho):
+            self._carregar_pasta(caminho, adicionar_historico=True)
+
+    def _on_up(self, _btn):
+        if not self._current_folder:
+            return
+        pai = os.path.dirname(self._current_folder)
+        if pai and pai != self._current_folder and is_origem_permitida(pai, self._get_cfg()):
+            self._carregar_pasta(pai, adicionar_historico=True)
+
+    def _on_back(self, _btn):
+        while self._history:
+            ant = self._history.pop()
+            if os.path.isdir(ant) and is_origem_permitida(ant, self._get_cfg()):
+                self._carregar_pasta(ant, adicionar_historico=False)
+                return
+        self.btn_back.set_sensitive(False)
+
+    def _on_filter_changed(self, combo):
+        self._modo_filtro = combo.get_active_id() or "imagens"
+        if self._current_folder:
+            self._carregar_pasta(self._current_folder, adicionar_historico=False)
+
+    def _on_files_selection_changed(self, _selection):
+        if self._on_selection_changed_cb:
+            self._on_selection_changed_cb(self)
+
+    # Métodos compatíveis com a interface usada por ChronosArkheApp
+    def get_filenames(self):
+        sel = self.tree_files.get_selection()
+        model, paths = sel.get_selected_rows()
+        return [model[p][4] for p in paths]
+
+    def get_current_folder(self):
+        return self._current_folder
+
+    def set_current_folder(self, caminho):
+        if caminho and os.path.isdir(caminho) and is_origem_permitida(caminho, self._get_cfg()):
+            self._carregar_pasta(caminho, adicionar_historico=False)
+        else:
+            self.refresh()
+
+    def select_all(self):
+        self.tree_files.get_selection().select_all()
+
+    def unselect_all(self):
+        self.tree_files.get_selection().unselect_all()
+
+
+def _escolher_pasta_filtrada(parent, titulo, pasta_inicial, cfg, raiz_obrigatoria=None):
+    """
+    Diálogo de escolha de pasta que oculta todas as pastas presentes em pastas_excluidas.
+    Se raiz_obrigatoria for indicada (ex: PASTA_IMAGENS_PADRAO para destino),
+    restringe a navegação e seleção exclusivamente a essa pasta e respetivas subpastas.
+    """
+    raiz_abs = os.path.abspath(os.path.expanduser(raiz_obrigatoria)) if raiz_obrigatoria else None
+    if raiz_abs:
+        os.makedirs(raiz_abs, exist_ok=True)
+
+    def _permitida(p):
+        p_abs = os.path.abspath(os.path.expanduser(str(p)))
+        if is_pasta_excluida(p_abs, cfg):
+            return False
+        if raiz_abs:
+            return p_abs == raiz_abs or p_abs.startswith(raiz_abs.rstrip(os.sep) + os.sep)
+        return True
+
+    dlg = Gtk.Dialog(
+        title=titulo,
+        parent=parent,
+        flags=Gtk.DialogFlags.MODAL,
+    )
+    dlg.set_default_size(540, 420)
+    dlg.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+    dlg.set_border_width(10)
+
+    box = dlg.get_content_area()
+    box.set_spacing(8)
+
+    nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+    btn_up = Gtk.Button(label="⬆ Subir")
+    btn_raiz = Gtk.Button(label="🖼️ ~/Imagens" if raiz_abs else "🏠 Pasta Pessoal")
+    lbl_atual = Gtk.Label(label="")
+    lbl_atual.set_xalign(0)
+    if HAS_PANGO:
+        try:
+            lbl_atual.set_ellipsize(Pango.EllipsizeMode.START)
+        except Exception:
+            pass
+
+    nav.pack_start(btn_up, False, False, 0)
+    nav.pack_start(btn_raiz, False, False, 0)
+    if not raiz_abs:
+        btn_media = Gtk.Button(label="💾 /media")
+        nav.pack_start(btn_media, False, False, 0)
+    else:
+        btn_media = None
+        btn_nova = Gtk.Button(label="➕ Nova Subpasta")
+        nav.pack_end(btn_nova, False, False, 0)
+
+    nav.pack_start(lbl_atual, True, True, 4)
+    box.pack_start(nav, False, False, 0)
+
+    store = Gtk.ListStore(str, str, str)
+    tree = Gtk.TreeView(model=store)
+    col_titulo = "Subpastas de ~/Imagens (duplo clique para abrir)" if raiz_abs else "Subpastas permitidas"
+    col = Gtk.TreeViewColumn(col_titulo)
+    cell_i = Gtk.CellRendererPixbuf()
+    cell_t = Gtk.CellRendererText()
+    col.pack_start(cell_i, False)
+    col.pack_start(cell_t, True)
+    col.add_attribute(cell_i, "icon-name", 0)
+    col.add_attribute(cell_t, "text", 1)
+    tree.append_column(col)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    scroll.add(tree)
+    box.pack_start(scroll, True, True, 0)
+
+    inicial_padrao = raiz_abs if raiz_abs else str(pathlib.Path.home())
+    estado = {"atual": inicial_padrao}
+    if pasta_inicial and os.path.isdir(pasta_inicial) and _permitida(pasta_inicial):
+        estado["atual"] = os.path.abspath(pasta_inicial)
+
+    def _carregar(p):
+        p_abs = os.path.abspath(p)
+        if not os.path.isdir(p_abs) or not _permitida(p_abs):
+            return
+        estado["atual"] = p_abs
+        lbl_atual.set_label(f"📂 {p_abs}")
+        pai = os.path.dirname(p_abs)
+        btn_up.set_sensitive(bool(pai and pai != p_abs and _permitida(pai)))
+        store.clear()
+        try:
+            for entry in sorted(os.scandir(p_abs), key=lambda e: e.name.lower()):
+                if not entry.is_dir() or entry.name.startswith("."):
+                    continue
+                if not _permitida(entry.path):
+                    continue
+                store.append(["folder-symbolic", entry.name, entry.path])
+        except OSError:
+            pass
+
+    def _subir(_):
+        pai = os.path.dirname(estado["atual"])
+        if pai and pai != estado["atual"] and _permitida(pai):
+            _carregar(pai)
+
+    def _ativar(_tv, path, _col):
+        _carregar(store[path][2])
+
+    def _criar_subpasta(_):
+        sub_dlg = Gtk.Dialog(
+            title="Nova Subpasta em ~/Imagens",
+            parent=dlg,
+            flags=Gtk.DialogFlags.MODAL,
+        )
+        sub_dlg.set_border_width(10)
+        b = sub_dlg.get_content_area()
+        b.set_spacing(6)
+        b.pack_start(Gtk.Label(label=f"Criar dentro de: {estado['atual']}"), False, False, 0)
+        ent = Gtk.Entry()
+        ent.set_placeholder_text("Nome da nova pasta (ex: 2026 ou Fotografias)")
+        b.pack_start(ent, False, False, 0)
+        sub_dlg.add_button("Cancelar", Gtk.ResponseType.CANCEL)
+        sub_dlg.add_button("Criar", Gtk.ResponseType.OK)
+        ent.connect("activate", lambda _: sub_dlg.response(Gtk.ResponseType.OK))
+        sub_dlg.show_all()
+        if sub_dlg.run() == Gtk.ResponseType.OK:
+            nome_novo = ent.get_text().strip().strip("/")
+            if nome_novo:
+                novo_caminho = os.path.join(estado["atual"], nome_novo)
+                if _permitida(novo_caminho):
+                    try:
+                        os.makedirs(novo_caminho, exist_ok=True)
+                        _carregar(novo_caminho)
+                    except OSError:
+                        pass
+        sub_dlg.destroy()
+
+    btn_up.connect("clicked", _subir)
+    btn_raiz.connect("clicked", lambda _: _carregar(inicial_padrao))
+    if btn_media is not None:
+        btn_media.connect("clicked", lambda _: _carregar("/media") if os.path.isdir("/media") else None)
+    else:
+        btn_nova.connect("clicked", _criar_subpasta)
+    tree.connect("row-activated", _ativar)
+
+    _carregar(estado["atual"])
+
+    dlg.add_button("Cancelar", Gtk.ResponseType.CANCEL)
+    btn_ok = dlg.add_button("Selecionar Esta Pasta", Gtk.ResponseType.OK)
+    btn_ok.get_style_context().add_class(Gtk.STYLE_CLASS_SUGGESTED_ACTION)
+    dlg.show_all()
+
+    escolhida = None
+    if dlg.run() == Gtk.ResponseType.OK:
+        sel = tree.get_selection()
+        model, it = sel.get_selected()
+        candidata = model[it][2] if it is not None else estado["atual"]
+        if _permitida(candidata):
+            escolhida = candidata
+    dlg.destroy()
+    return escolhida
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # APLICAÇÃO PRINCIPAL
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ChronosArkheApp(Gtk.Window):
-    def __init__(self, initial_files=None):
+    def __init__(self, initial_files=None, debug_mode=False):
         super().__init__(title="Chronos Arkhe — Organizar Fotos")
-        self.set_default_size(900, 650)
+        self.set_default_size(920, 680)
         self.set_position(Gtk.WindowPosition.CENTER)
-        self.connect("destroy", Gtk.main_quit)
+        self.set_icon_name("chronos-arkhe")
+        self.connect("destroy", self._on_destroy)
 
         self.cfg = load_config()
+        self.debug_mode = debug_mode
         self.ficheiros = []
         self.datas = {}
         self.info = {}
-        self.state = "IDLE"  # IDLE, SCANNING, PROCESSING
+        self.state = "IDLE"  # IDLE, PROCESSING
         self.abort = False
         self.processed = 0
+        self.processed_sidecars = 0
         self.failed = 0
         self.errors = []
-        self.usar_move = False
+        self.usar_move = self.cfg.get("usar_move", False)
+        self._preserve_initial_files = False
+        self._ultima_pasta_valida = str(pathlib.Path.home())
+        self._revertendo_pasta = False
 
         # UI PRINCIPAL
         main_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=12)
@@ -234,7 +1279,7 @@ class ChronosArkheApp(Gtk.Window):
         ctrl_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         main_vbox.pack_start(ctrl_box, False, False, 0)
 
-        lbl_desc = Gtk.Label(label="Selecione fotos para organizar por data EXIF")
+        lbl_desc = Gtk.Label(label="Selecione fotos (ou uma pasta de fotos) para organizar por coleção/data EXIF:")
         lbl_desc.set_xalign(0)
         ctrl_box.pack_start(lbl_desc, False, False, 0)
 
@@ -243,33 +1288,41 @@ class ChronosArkheApp(Gtk.Window):
         grid.set_column_spacing(15)
         ctrl_box.pack_start(grid, False, False, 0)
 
-        self.check_ask = Gtk.CheckButton(label="Pedir Evento e Local para cada data")
+        self.check_ask = Gtk.CheckButton(label="Pedir Evento e Local para cada data (coleção)")
         self.check_ask.set_active(self.cfg.get("ask_mode", True))
+        self.check_ask.connect("toggled", self._on_toggle_ask)
         grid.attach(self.check_ask, 0, 0, 2, 1)
 
         lbl_modo = Gtk.Label(label="Operação:")
         lbl_modo.set_xalign(1)
         grid.attach(lbl_modo, 0, 1, 1, 1)
 
-        self.toggle_move = Gtk.ToggleButton(label="Copiar (padrão)")
-        self.toggle_move.set_active(self.cfg.get("usar_move", False))
+        label_toggle_inicial = "Mover ficheiros" if self.usar_move else "Copiar (padrão)"
+        self.toggle_move = Gtk.ToggleButton(label=label_toggle_inicial)
+        self.toggle_move.set_active(self.usar_move)
         self.toggle_move.connect("toggled", self._on_toggle_move)
         grid.attach(self.toggle_move, 1, 1, 1, 1)
 
-        # Pasta destino
-        frame_dest = Gtk.Frame(label="Pasta de Destino")
+        btn_excluidas = Gtk.Button(label="🛡️ Origens e Excepções...")
+        btn_excluidas.connect("clicked", self._on_gerir_excluidas)
+        grid.attach(btn_excluidas, 2, 1, 1, 1)
+
+        # Pasta destino (apenas ~/Imagens ou subpastas de ~/Imagens)
+        frame_dest = Gtk.Frame(label="Pasta de Destino (apenas em ~/Imagens)")
         box_dest = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, margin=8)
 
-        default_pasta = self.cfg.get("ultima_pasta", str(pathlib.Path.home() / "Imagens"))
+        default_pasta = self.cfg.get("ultima_pasta") or PASTA_IMAGENS_PADRAO
+        if not is_destino_permitido(default_pasta, self.cfg):
+            default_pasta = PASTA_IMAGENS_PADRAO
         self.lbl_pasta = Gtk.Label(label=default_pasta)
         self.lbl_pasta.set_xalign(0)
         self.lbl_pasta.set_halign(Gtk.Align.FILL)
         self.lbl_pasta.set_line_wrap(True)
         self.lbl_pasta.set_selectable(True)
-        if HAS_EXIFREAD:  # Reutilizar verificação de módulo
+        if HAS_PANGO:
             try:
                 self.lbl_pasta.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-            except:
+            except Exception:
                 pass
         self.pasta_destino = default_pasta
 
@@ -286,26 +1339,13 @@ class ChronosArkheApp(Gtk.Window):
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         main_vbox.pack_start(paned, True, True, 0)
 
-        # Navegador esquerda
-        file_chooser = Gtk.FileChooserWidget(
-            action=Gtk.FileChooserAction.OPEN,
-            select_multiple=True
+        # Navegador esquerda (OrigensFileBrowser: nunca mostra pastas proibidas nem locais fora das origens permitidas)
+        self.file_chooser = OrigensFileBrowser(
+            get_cfg_callable=lambda: self.cfg,
+            on_selection_changed=self._on_chooser_selection_changed,
+            on_folder_changed=self._on_current_folder_changed,
         )
-        file_chooser.set_local_only(False)
-
-        filter_imgs = Gtk.FileFilter()
-        filter_imgs.set_name("Imagens e RAWs")
-        for ext in sorted(IMAGE_EXTS):
-            filter_imgs.add_pattern(f"*{ext}")
-            filter_imgs.add_pattern(f"*{ext.upper()}")
-        file_chooser.add_filter(filter_imgs)
-
-        filter_all = Gtk.FileFilter()
-        filter_all.set_name("Todos os ficheiros")
-        filter_all.add_pattern("*")
-        file_chooser.add_filter(filter_all)
-
-        paned.pack1(file_chooser, resize=True, shrink=False)
+        paned.pack1(self.file_chooser, resize=True, shrink=False)
 
         # Preview direita
         right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
@@ -318,38 +1358,32 @@ class ChronosArkheApp(Gtk.Window):
         scroll_preview.add(self.img_preview)
         right_box.pack_start(scroll_preview, False, False, 0)
 
-        lbl_sel = Gtk.Label(label="Ficheiros:")
-        lbl_sel.set_xalign(0)
-        right_box.pack_start(lbl_sel, False, False, 0)
+        self.lbl_sel = Gtk.Label(label="Ficheiros selecionados (0):")
+        self.lbl_sel.set_xalign(0)
+        right_box.pack_start(self.lbl_sel, False, False, 0)
 
         self.liststore = Gtk.ListStore(str, str)
         self.treeview = Gtk.TreeView(model=self.liststore)
         col = Gtk.TreeViewColumn("Ficheiro", Gtk.CellRendererText(), text=0)
         col.set_resizable(True)
         self.treeview.append_column(col)
+        self.treeview.get_selection().connect("changed", self._on_tree_selection_changed)
 
         scroll_list = Gtk.ScrolledWindow()
         scroll_list.add(self.treeview)
         right_box.pack_start(scroll_list, True, True, 0)
 
+        btn_list_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_sel_all = Gtk.Button(label="Selecionar Tudo")
+        btn_sel_all.connect("clicked", self._on_select_all)
         btn_clear = Gtk.Button(label="Limpar")
-        btn_clear.connect("clicked", lambda w: file_chooser.unselect_all())
-        right_box.pack_end(btn_clear, False, False, 0)
+        btn_clear.connect("clicked", self._on_clear_selection)
+        btn_list_box.pack_start(btn_sel_all, True, True, 0)
+        btn_list_box.pack_start(btn_clear, True, True, 0)
+        right_box.pack_end(btn_list_box, False, False, 0)
 
         paned.pack2(right_box, resize=False, shrink=True)
-        paned.set_position(550)
-
-        def atualizar_lista():
-            self.ficheiros = file_chooser.get_filenames()
-            self.liststore.clear()
-            for f in self.ficheiros:
-                self.liststore.append([os.path.basename(f), f])
-            if self.ficheiros:
-                pixbuf = image_to_pixbuf(self.ficheiros[0])
-                if pixbuf:
-                    self.img_preview.set_from_pixbuf(pixbuf)
-
-        file_chooser.connect("selection-changed", lambda w: atualizar_lista())
+        paned.set_position(560)
 
         # 4. PAINEL DE LOG
         frame_log = Gtk.Frame(label="Progresso")
@@ -377,7 +1411,7 @@ class ChronosArkheApp(Gtk.Window):
         main_vbox.pack_end(action_box, False, False, 0)
 
         self.btn_cancel = Gtk.Button(label="Cancelar")
-        self.btn_cancel.connect("clicked", lambda w: Gtk.main_quit())
+        self.btn_cancel.connect("clicked", self._on_cancel)
         action_box.pack_end(self.btn_cancel, False, False, 0)
 
         self.btn_start = Gtk.Button(label="Iniciar Organização")
@@ -385,122 +1419,690 @@ class ChronosArkheApp(Gtk.Window):
         self.btn_start.connect("clicked", self._on_start)
         action_box.pack_end(self.btn_start, False, False, 0)
 
+        # Carregar ficheiros iniciais (modo Nautilus / CLI) ou última pasta de origem permitida
+        self.file_chooser.refresh()
+        if initial_files:
+            expandidos = _expandir_caminhos(initial_files, self.cfg)
+            if expandidos:
+                self._preserve_initial_files = True
+                self._definir_ficheiros(expandidos)
+                pasta_inicial = os.path.dirname(expandidos[0])
+                if os.path.isdir(pasta_inicial) and is_origem_permitida(pasta_inicial, self.cfg):
+                    self.file_chooser.set_current_folder(pasta_inicial)
+        else:
+            pasta_origem = self.cfg.get("ultima_pasta_origem")
+            if (
+                pasta_origem
+                and os.path.isdir(pasta_origem)
+                and is_origem_permitida(pasta_origem, self.cfg)
+            ):
+                self.file_chooser.set_current_folder(pasta_origem)
+
+    def _on_current_folder_changed(self, chooser):
+        pasta_atual = chooser.get_current_folder()
+        if pasta_atual and is_origem_permitida(pasta_atual, self.cfg):
+            self._ultima_pasta_valida = pasta_atual
+
+    def _definir_ficheiros(self, lista_ficheiros):
+        """Atualiza a lista interna de ficheiros, a TreeView e a miniatura."""
+        self.ficheiros = list(lista_ficheiros)
+        self.liststore.clear()
+        for f in self.ficheiros:
+            self.liststore.append([os.path.basename(f), f])
+        self.lbl_sel.set_label(f"Ficheiros selecionados ({len(self.ficheiros)}):")
+        if self.ficheiros:
+            pixbuf = image_to_pixbuf(self.ficheiros[0])
+            if pixbuf:
+                self.img_preview.set_from_pixbuf(pixbuf)
+            else:
+                self.img_preview.set_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.DIALOG)
+        else:
+            self.img_preview.set_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.DIALOG)
+
+    def _on_chooser_selection_changed(self, widget):
+        if not hasattr(self, "liststore"):
+            return
+        chooser = widget if hasattr(widget, "get_filenames") else getattr(self, "file_chooser", None)
+        if chooser is None:
+            return
+        raw = chooser.get_filenames()
+        # Filtrar imagens diretamente selecionadas (respeitando origens permitidas e pastas excluídas)
+        imagens = [
+            f for f in raw
+            if os.path.isfile(f)
+            and os.path.splitext(f)[1].lower() in IMAGE_EXTS
+            and is_origem_permitida(f, self.cfg)
+        ]
+
+        # Se apenas pastas foram selecionadas explicitamente (sem ficheiros),
+        # expandir imagens diretas dessas pastas apenas quando a pasta é permitida
+        if not imagens and len(raw) >= 1:
+            pastas = [
+                p for p in raw
+                if os.path.isdir(p) and is_origem_permitida(p, self.cfg)
+            ]
+            if pastas:
+                imagens_pasta = _expandir_caminhos(pastas, self.cfg)
+                if imagens_pasta:
+                    imagens = imagens_pasta
+
+        if self._preserve_initial_files and not imagens:
+            return
+        if imagens:
+            self._preserve_initial_files = False
+
+        self._definir_ficheiros(imagens)
+
+    def _on_select_all(self, widget):
+        self._preserve_initial_files = False
+        self.file_chooser.select_all()
+        raw = self.file_chooser.get_filenames()
+        imagens = [
+            f for f in raw
+            if os.path.isfile(f)
+            and os.path.splitext(f)[1].lower() in IMAGE_EXTS
+            and is_origem_permitida(f, self.cfg)
+        ]
+        if not imagens:
+            pasta_atual = self.file_chooser.get_current_folder()
+            if pasta_atual and is_origem_permitida(pasta_atual, self.cfg):
+                imagens = _expandir_caminhos([pasta_atual], self.cfg)
+        self._definir_ficheiros(imagens)
+
+    def _on_clear_selection(self, widget):
+        self._preserve_initial_files = False
+        self.file_chooser.unselect_all()
+        self._definir_ficheiros([])
+
+    def _on_tree_selection_changed(self, selection):
+        model, treeiter = selection.get_selected()
+        if treeiter is not None:
+            caminho = model[treeiter][1]
+            pixbuf = image_to_pixbuf(caminho)
+            if pixbuf:
+                self.img_preview.set_from_pixbuf(pixbuf)
+            else:
+                self.img_preview.set_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.DIALOG)
+
+    def _persistir_preferencias(self):
+        """Atualiza e grava o estado atual da aplicação em ~/.config/chronos/arkhe.json."""
+        self.cfg["ultima_pasta"] = self.pasta_destino
+        pasta_origem = self.file_chooser.get_current_folder()
+        if pasta_origem and os.path.isdir(pasta_origem) and is_origem_permitida(pasta_origem, self.cfg):
+            self.cfg["ultima_pasta_origem"] = pasta_origem
+        self.cfg["ask_mode"] = self.check_ask.get_active()
+        self.cfg["usar_move"] = self.toggle_move.get_active()
+        save_config(self.cfg)
+
+    def _on_destroy(self, widget):
+        self._persistir_preferencias()
+        Gtk.main_quit()
+
+    def _on_toggle_ask(self, widget):
+        self._persistir_preferencias()
+
     def _on_toggle_move(self, widget):
         if widget.get_active():
             widget.set_label("Mover ficheiros")
         else:
             widget.set_label("Copiar (padrão)")
+        self._persistir_preferencias()
+
+    def _on_cancel(self, widget):
+        if self.state == "PROCESSING":
+            self.abort = True
+            self._log("⚠️ Cancelamento solicitado pelo utilizador...")
+        else:
+            self._persistir_preferencias()
+            Gtk.main_quit()
 
     def _on_browse(self, widget):
-        pasta_atual = self.pasta_destino or str(pathlib.Path.home() / "Imagens")
-        if not os.path.isdir(pasta_atual):
+        pasta_atual = self.pasta_destino or PASTA_IMAGENS_PADRAO
+        if not is_destino_permitido(pasta_atual, self.cfg) or not os.path.isdir(pasta_atual):
+            pasta_atual = PASTA_IMAGENS_PADRAO
             try:
                 os.makedirs(pasta_atual, exist_ok=True)
             except OSError:
-                pasta_atual = str(pathlib.Path.home())
+                pass
 
-        dlg = Gtk.FileChooserDialog(
-            title="Escolher pasta de destino",
+        escolhida = _escolher_pasta_filtrada(
             parent=self,
-            action=Gtk.FileChooserAction.SELECT_FOLDER,
+            titulo="Escolher pasta de destino (apenas em ~/Imagens)",
+            pasta_inicial=pasta_atual,
+            cfg=self.cfg,
+            raiz_obrigatoria=PASTA_IMAGENS_PADRAO,
         )
-        dlg.add_buttons("Cancelar", Gtk.ResponseType.CANCEL, "Selecionar", Gtk.ResponseType.OK)
-        dlg.set_current_folder(pasta_atual)
-
-        btn_ok = dlg.get_widget_for_response(Gtk.ResponseType.OK)
-        if btn_ok:
-            btn_ok.get_style_context().add_class(Gtk.STYLE_CLASS_SUGGESTED_ACTION)
-
-        if dlg.run() == Gtk.ResponseType.OK:
-            self.pasta_destino = dlg.get_filename()
+        if escolhida and is_destino_permitido(escolhida, self.cfg):
+            self.pasta_destino = escolhida
             self.lbl_pasta.set_label(self.pasta_destino)
+            self._persistir_preferencias()
+
+    def _on_gerir_excluidas(self, widget):
+        """Diálogo para gerir Origens Permitidas (~/Imagens, ~/Transferências, Pendrives/SD/Câmara) e Excepções."""
+        dlg = Gtk.Dialog(
+            title="🛡️ Origens Permitidas e Excepções",
+            parent=self,
+            flags=Gtk.DialogFlags.MODAL,
+        )
+        dlg.set_default_size(600, 480)
+        dlg.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        dlg.set_border_width(12)
+
+        box = dlg.get_content_area()
+        box.set_spacing(10)
+
+        lbl_cfg = Gtk.Label(label=f"Configuração guardada em: {CONFIG_FILE}")
+        lbl_cfg.set_xalign(0)
+        box.pack_start(lbl_cfg, False, False, 0)
+
+        chk_restringir = Gtk.CheckButton(
+            label="Aceitar fotos APENAS das origens permitidas (~/Imagens, ~/Transferências, Pendrives, SD e Câmara)"
+        )
+        chk_restringir.set_active(self.cfg.get("restringir_origens", True))
+        box.pack_start(chk_restringir, False, False, 0)
+
+        notebook = Gtk.Notebook()
+        box.pack_start(notebook, True, True, 0)
+
+        def _criar_painel_lista(itens_iniciais, titulo_coluna, placeholder, texto_ajuda, padrao_restaurar=None):
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10)
+            lbl_h = Gtk.Label(label=texto_ajuda)
+            lbl_h.set_xalign(0)
+            lbl_h.set_line_wrap(True)
+            vbox.pack_start(lbl_h, False, False, 0)
+
+            store = Gtk.ListStore(str)
+            for item in itens_iniciais:
+                store.append([str(item)])
+
+            tree = Gtk.TreeView(model=store)
+            col = Gtk.TreeViewColumn(titulo_coluna, Gtk.CellRendererText(), text=0)
+            tree.append_column(col)
+
+            scroll = Gtk.ScrolledWindow()
+            scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            scroll.add(tree)
+            vbox.pack_start(scroll, True, True, 0)
+
+            add_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            entry = Gtk.Entry()
+            entry.set_placeholder_text(placeholder)
+            btn_add = Gtk.Button(label="Adicionar")
+            btn_pick = Gtk.Button(label="Procurar Pasta...")
+            btn_remove = Gtk.Button(label="Remover")
+
+            def _adicionar(_):
+                txt = entry.get_text().strip()
+                if txt:
+                    atuais = [row[0] for row in store]
+                    if txt not in atuais:
+                        store.append([txt])
+                    entry.set_text("")
+
+            def _escolher_pasta(_):
+                pasta_sel = _escolher_pasta_filtrada(
+                    parent=dlg,
+                    titulo="Selecionar pasta",
+                    pasta_inicial="/media" if os.path.isdir("/media") else str(pathlib.Path.home()),
+                    cfg={"pastas_excluidas": []},
+                )
+                if pasta_sel:
+                    atuais = [row[0] for row in store]
+                    if pasta_sel not in atuais:
+                        store.append([pasta_sel])
+
+            def _remover(_):
+                sel = tree.get_selection()
+                model, treeiter = sel.get_selected()
+                if treeiter is not None:
+                    model.remove(treeiter)
+
+            btn_add.connect("clicked", _adicionar)
+            entry.connect("activate", _adicionar)
+            btn_pick.connect("clicked", _escolher_pasta)
+            btn_remove.connect("clicked", _remover)
+
+            add_box.pack_start(entry, True, True, 0)
+            add_box.pack_start(btn_add, False, False, 0)
+            add_box.pack_start(btn_pick, False, False, 0)
+            add_box.pack_start(btn_remove, False, False, 0)
+
+            if padrao_restaurar is not None:
+                btn_reset = Gtk.Button(label="Padrão Debian")
+                def _restaurar(_):
+                    store.clear()
+                    for p in padrao_restaurar:
+                        store.append([str(p)])
+                btn_reset.connect("clicked", _restaurar)
+                add_box.pack_start(btn_reset, False, False, 0)
+
+            vbox.pack_start(add_box, False, False, 0)
+            return vbox, store
+
+        painel_origens, store_origens = _criar_painel_lista(
+            self.cfg.get("origens_permitidas") or ORIGENS_PERMITIDAS_PADRAO,
+            "Pasta de Origem Permitida (Caminho)",
+            f"Ex.: ~/Imagens, ~/Transferências, /media/{_USER_NAME}",
+            (
+                "Origens autorizadas (e respetivas subpastas):\n"
+                f"• Pastas locais: {PASTA_IMAGENS_PADRAO} e {PASTA_TRANSFERENCIAS_PADRAO}\n"
+                f"• Pendrives e Cartões SD: /media/{_USER_NAME} (ou /run/media/{_USER_NAME})\n"
+                f"• Máquinas fotográficas USB (PTP/MTP): /run/user/{_USER_UID}/gvfs"
+            ),
+            padrao_restaurar=ORIGENS_PERMITIDAS_PADRAO,
+        )
+        notebook.append_page(painel_origens, Gtk.Label(label="✅ Origens Permitidas"))
+
+        painel_excluidas, store_excluidas = _criar_painel_lista(
+            self.cfg.get("pastas_excluidas", []),
+            "Nome de Pasta ou Caminho Bloqueado",
+            "Ex.: .git, System Volume Information, ~/Privado",
+            "Pastas sempre ignoradas/bloqueadas (mesmo dentro de pendrives ou cartões de memória):",
+            padrao_restaurar=PASTAS_EXCLUIDAS_PADRAO,
+        )
+        notebook.append_page(painel_excluidas, Gtk.Label(label="🚫 Pastas Indesejadas (Excepções)"))
+
+        dlg.add_button("Cancelar", Gtk.ResponseType.CANCEL)
+        btn_save = dlg.add_button("Guardar", Gtk.ResponseType.OK)
+        btn_save.get_style_context().add_class(Gtk.STYLE_CLASS_SUGGESTED_ACTION)
+
+        dlg.show_all()
+        if dlg.run() == Gtk.ResponseType.OK:
+            self.cfg["restringir_origens"] = chk_restringir.get_active()
+            self.cfg["origens_permitidas"] = [row[0] for row in store_origens]
+            self.cfg["pastas_excluidas"] = [row[0] for row in store_excluidas]
+            save_config(self.cfg)
+
+            # Atualizar imediatamente o navegador de origens e fotos
+            self.file_chooser.refresh()
+            modo_txt = "ATIVO (apenas pendrives/SD/câmara)" if self.cfg["restringir_origens"] else "INATIVO (todas exceto bloqueadas)"
+            self._log(
+                f"✅ Regras atualizadas: Restringir origens = {modo_txt} | "
+                f"{len(self.cfg['origens_permitidas'])} origens | "
+                f"{len(self.cfg['pastas_excluidas'])} excepções."
+            )
         dlg.destroy()
 
     def _log(self, text):
         def _append():
             buf = self.text_log.get_buffer()
             buf.insert(buf.get_end_iter(), text + "\n")
-            self.text_log.scroll_to_mark(buf.get_insert(), 0, False)
+            buf.place_cursor(buf.get_end_iter())
+            self.text_log.scroll_to_mark(buf.get_insert(), 0.0, False, 0.0, 0.0)
+            return False
         GLib.idle_add(_append)
 
+    def _run_on_main_thread(self, func, *args, **kwargs):
+        """Executa uma função síncrona (ex: diálogo GTK) na main thread e aguarda o retorno."""
+        evento = threading.Event()
+        resultado = {"valor": None}
+
+        def _wrapper():
+            try:
+                resultado["valor"] = func(*args, **kwargs)
+            finally:
+                evento.set()
+            return False
+
+        GLib.idle_add(_wrapper)
+        evento.wait()
+        return resultado["valor"]
+
+    def _dialogo_aviso_data_unica(self, data_unica, total_fotos, fontes):
+        """Mostra aviso se muitas fotos caíram todas na mesma data."""
+        d_fmt = f"{data_unica[:4]}-{data_unica[4:6]}-{data_unica[6:8]}"
+        msg_diag = (
+            f"⚠️ ATENÇÃO: {total_fotos} fotos foram todas agrupadas na mesma data ({d_fmt}).\n"
+            f"Isto pode indicar que o EXIF não foi lido corretamente ou todas pertencem ao mesmo dia.\n\n"
+            f"Fontes usadas: Pillow={fontes['pillow']}, exifread={fontes['exifread']}, "
+            f"exiftool={fontes['exiftool']}, mtime={fontes['mtime']}\n\n"
+            f"Continuar mesmo assim?"
+        )
+        dlg = Gtk.MessageDialog(
+            parent=self,
+            flags=Gtk.DialogFlags.MODAL,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text=msg_diag
+        )
+        dlg.add_buttons("Cancelar", Gtk.ResponseType.CANCEL, "Continuar", Gtk.ResponseType.OK)
+        res = dlg.run()
+        dlg.destroy()
+        return res == Gtk.ResponseType.OK
+
+    def _dialogo_por_data(self, data_str, fotos_da_data, hist_ev, hist_loc):
+        """Diálogo GTK para pedir Evento e Local de uma coleção/data específica."""
+        d_fmt = f"{data_str[:4]}-{data_str[4:6]}-{data_str[6:8]}"
+        total = len(fotos_da_data)
+        dlg = Gtk.Dialog(
+            title=f"📅 Coleção {d_fmt} ({total} foto{'s' if total != 1 else ''})",
+            parent=self,
+            flags=Gtk.DialogFlags.MODAL,
+        )
+        dlg.set_default_size(440, -1)
+        dlg.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        dlg.set_border_width(16)
+        dlg.set_resizable(False)
+
+        box = dlg.get_content_area()
+        box.set_spacing(12)
+
+        lbl_info = Gtk.Label(
+            label=f"Data de captura: {d_fmt} ({total} foto{'s' if total != 1 else ''})\n"
+                  f"Indique o Evento e o Local para esta coleção:"
+        )
+        lbl_info.set_xalign(0)
+        box.pack_start(lbl_info, False, False, 0)
+
+        # Preview com navegação entre fotos desta data
+        idx_state = {"idx": 0}
+        img = Gtk.Image()
+        lbl_foto = Gtk.Label()
+
+        def atualizar_preview_data():
+            caminho_atual = fotos_da_data[idx_state["idx"]]
+            pixbuf = image_to_pixbuf(caminho_atual)
+            if pixbuf:
+                img.set_from_pixbuf(pixbuf)
+            else:
+                img.set_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.DIALOG)
+            lbl_foto.set_label(f"{os.path.basename(caminho_atual)} ({idx_state['idx'] + 1}/{total})")
+
+        atualizar_preview_data()
+        box.pack_start(img, True, True, 4)
+
+        if total > 1:
+            nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            nav_box.set_halign(Gtk.Align.CENTER)
+            btn_prev = Gtk.Button(label="◀")
+            btn_next = Gtk.Button(label="▶")
+
+            def _prev(_):
+                idx_state["idx"] = (idx_state["idx"] - 1) % total
+                atualizar_preview_data()
+
+            def _next(_):
+                idx_state["idx"] = (idx_state["idx"] + 1) % total
+                atualizar_preview_data()
+
+            btn_prev.connect("clicked", _prev)
+            btn_next.connect("clicked", _next)
+            nav_box.pack_start(btn_prev, False, False, 0)
+            nav_box.pack_start(lbl_foto, False, False, 6)
+            nav_box.pack_start(btn_next, False, False, 0)
+            box.pack_start(nav_box, False, False, 0)
+        else:
+            box.pack_start(lbl_foto, False, False, 0)
+
+        grid = Gtk.Grid()
+        grid.set_row_spacing(10)
+        grid.set_column_spacing(10)
+        grid.set_halign(Gtk.Align.CENTER)
+
+        combo_ev = Gtk.ComboBoxText.new_with_entry()
+        for ev in hist_ev:
+            combo_ev.append_text(ev)
+
+        combo_loc = Gtk.ComboBoxText.new_with_entry()
+        for loc in hist_loc:
+            combo_loc.append_text(loc)
+
+        lbl_ev = Gtk.Label(label="Evento:")
+        lbl_ev.set_xalign(1)
+        lbl_loc = Gtk.Label(label="Local:")
+        lbl_loc.set_xalign(1)
+
+        grid.attach(lbl_ev, 0, 0, 1, 1)
+        grid.attach(combo_ev, 1, 0, 1, 1)
+        grid.attach(lbl_loc, 0, 1, 1, 1)
+        grid.attach(combo_loc, 1, 1, 1, 1)
+        box.pack_start(grid, False, False, 4)
+
+        # Preview em tempo real do nome da pasta que será criada
+        lbl_pasta_preview = Gtk.Label(label=f"Pasta: {data_str}_Evento_Local")
+        lbl_pasta_preview.set_xalign(0.5)
+        box.pack_start(lbl_pasta_preview, False, False, 2)
+
+        dlg.add_button("Cancelar Tudo", Gtk.ResponseType.REJECT)
+        dlg.add_button("Usar Padrão", Gtk.ResponseType.CANCEL)
+        btn_ok = dlg.add_button("OK", Gtk.ResponseType.OK)
+        btn_ok.get_style_context().add_class(Gtk.STYLE_CLASS_SUGGESTED_ACTION)
+        btn_ok.set_sensitive(False)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+
+        def validar(*_args):
+            ev = (combo_ev.get_active_text() or "").strip()
+            loc = (combo_loc.get_active_text() or "").strip()
+            valido = bool(ev) and bool(loc)
+            btn_ok.set_sensitive(valido)
+            ev_s = sanitize(ev) if ev else "Evento"
+            loc_s = sanitize(loc) if loc else "Local"
+            lbl_pasta_preview.set_label(f"Pasta: {data_str}_{ev_s}_{loc_s}")
+
+        entry_ev = combo_ev.get_child()
+        entry_loc = combo_loc.get_child()
+        entry_ev.connect("changed", validar)
+        entry_loc.connect("changed", validar)
+        entry_ev.connect("activate", lambda _: entry_loc.grab_focus())
+        entry_loc.connect("activate", lambda _: dlg.response(Gtk.ResponseType.OK) if btn_ok.get_sensitive() else None)
+
+        dlg.show_all()
+        res = dlg.run()
+        ev = (combo_ev.get_active_text() or "").strip()
+        loc = (combo_loc.get_active_text() or "").strip()
+        dlg.destroy()
+
+        if res == Gtk.ResponseType.REJECT:
+            return "ABORT"
+        if res == Gtk.ResponseType.OK and ev and loc:
+            return (ev, loc)
+        return None
+
+    def _dialogo_relatorio_final(self, msg):
+        """Mostra diálogo final com o resumo da organização."""
+        dlg = Gtk.MessageDialog(
+            parent=self,
+            flags=Gtk.DialogFlags.MODAL,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text=msg
+        )
+        dlg.run()
+        dlg.destroy()
+
     def _on_start(self, widget):
+        if not is_destino_permitido(self.pasta_destino, self.cfg):
+            self.pasta_destino = PASTA_IMAGENS_PADRAO
+            self.lbl_pasta.set_label(self.pasta_destino)
+
+        # Se nenhum ficheiro estiver na lista mas o utilizador tiver uma pasta selecionada/aberta,
+        # tentar expandir as imagens dessa pasta
         if not self.ficheiros:
+            selecionados_chooser = self.file_chooser.get_filenames()
+            expandidos = _expandir_caminhos(selecionados_chooser, self.cfg)
+            if not expandidos:
+                pasta_atual = self.file_chooser.get_current_folder()
+                if pasta_atual and is_origem_permitida(pasta_atual, self.cfg):
+                    expandidos = _expandir_caminhos([pasta_atual], self.cfg)
+            if expandidos:
+                self._definir_ficheiros(expandidos)
+
+        # Filtrar apenas ficheiros de imagem existentes e nas origens permitidas
+        principais = [
+            f for f in self.ficheiros
+            if os.path.isfile(f)
+            and os.path.splitext(f)[1].lower() in IMAGE_EXTS
+            and is_origem_permitida(f, self.cfg)
+        ]
+        if not principais:
             dlg = Gtk.MessageDialog(
                 parent=self, flags=Gtk.DialogFlags.MODAL,
                 message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.OK,
-                text="Seleciona pelo menos uma foto."
+                text="Seleciona pelo menos uma foto válida para organizar."
             )
-            dlg.run(); dlg.destroy()
+            dlg.run()
+            dlg.destroy()
             return
 
+        self.ficheiros = principais
         self.state = "PROCESSING"
         self.processed = 0
+        self.processed_sidecars = 0
         self.failed = 0
         self.errors = []
         self.abort = False
         self.btn_start.set_sensitive(False)
+        self.progress.set_fraction(0.0)
         self.text_log.get_buffer().set_text("")
-        self._log("🚀 Iniciando processamento...\n")
+        self._log("🚀 Iniciando processamento...")
 
         self.usar_move = self.toggle_move.get_active()
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _worker(self):
         try:
-            # 1. Agrupa por data
-            self._log("📅 Extraindo datas EXIF...")
+            # 1. Agrupar fotos por data de captura EXIF
+            self._log(f"📅 Extraindo datas EXIF de {len(self.ficheiros)} foto(s)...")
             self.datas = {}
-            fontes = {'pillow': 0, 'exifread': 0, 'mtime': 0}
-            
+            datas_sem_exif = []
+            fontes = {'pillow': 0, 'exifread': 0, 'exiftool': 0, 'mtime': 0}
+
+            if self.debug_mode:
+                print("\n" + "=" * 70)
+                print("DIAGNÓSTICO EXIF POR FICHEIRO")
+                print("=" * 70)
+
             for f in self.ficheiros:
                 if self.abort:
                     break
                 if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
                     continue
-                
+
+                if self.debug_mode:
+                    _diagnostico_exif(f)
+
                 dt, used_fb, fonte = obter_data_exif(f)
                 fontes[fonte] = fontes.get(fonte, 0) + 1
                 data_str = dt.strftime("%Y%m%d")
                 self.datas.setdefault(data_str, []).append(f)
+                if used_fb:
+                    datas_sem_exif.append(os.path.basename(f))
+
+            if self.abort:
+                self._log("🛑 Operação cancelada.")
+                return
 
             datas_ord = sorted(self.datas.keys())
-            self._log(f"✅ {len(datas_ord)} data(s) encontrada(s) | "
-                     f"Pillow={fontes['pillow']}, exifread={fontes['exifread']}, mtime={fontes['mtime']}")
+            self._log(
+                f"✅ {len(datas_ord)} coleção(ões)/data(s) encontrada(s) | "
+                f"Pillow={fontes['pillow']}, exifread={fontes['exifread']}, "
+                f"exiftool={fontes['exiftool']}, mtime={fontes['mtime']}"
+            )
 
-            # 2. Pedir Evento/Local se necessário
+            if not datas_ord:
+                self._log("⚠️ Nenhuma foto válida encontrada para processar.")
+                return
+
+            # Diagnóstico: se só há 1 data para mais de 3 fotos e houve fallback mtime, avisar
+            if len(datas_ord) == 1 and len(self.ficheiros) > 3 and fontes['mtime'] > 0:
+                continuar = self._run_on_main_thread(
+                    self._dialogo_aviso_data_unica,
+                    datas_ord[0], len(self.ficheiros), fontes
+                )
+                if not continuar:
+                    self._log("🛑 Operação cancelada pelo utilizador no aviso de data única.")
+                    return
+
+            # 2. Pedir Evento e Local para cada data (coleção)
+            self.info = {}
+            historico_eventos = list(self.cfg.get("eventos", []))
+            historico_locais = list(self.cfg.get("locais", []))
+            fallback_cnt = 0
+
             if self.check_ask.get_active():
-                self._log("📝 Aguardando entrada de Evento/Local...\n")
+                self._log("📝 Aguardando identificação de Evento e Local por data...")
                 for d in datas_ord:
                     if self.abort:
                         break
-                    # TODO: Diálogo por data (simplificado por enquanto)
-                    self.info[d] = ("Evento", "Local")
+                    res = self._run_on_main_thread(
+                        self._dialogo_por_data,
+                        d, self.datas[d], historico_eventos, historico_locais
+                    )
+                    if res == "ABORT":
+                        self.abort = True
+                        break
+                    elif res:
+                        ev_raw, loc_raw = res
+                        if ev_raw not in historico_eventos:
+                            historico_eventos.append(ev_raw)
+                        if loc_raw not in historico_locais:
+                            historico_locais.append(loc_raw)
+                        self.info[d] = (sanitize(ev_raw), sanitize(loc_raw))
+                    else:
+                        self.info[d] = ("Evento", "Local")
+                        fallback_cnt += 1
             else:
                 for d in datas_ord:
                     self.info[d] = ("Evento", "Local")
+                    fallback_cnt += 1
 
-            # 3. Processar ficheiros
-            self._log("🔄 Processando ficheiros...")
+            if self.abort:
+                self._log("🛑 Operação cancelada.")
+                return
+
+            # 3. Guardar histórico e configuração antes de mover/copiar
+            self.cfg["eventos"] = sorted(set(historico_eventos))
+            self.cfg["locais"] = sorted(set(historico_locais))
+            self.cfg["ultima_pasta"] = self.pasta_destino
+            if self.ficheiros:
+                self.cfg["ultima_pasta_origem"] = os.path.dirname(self.ficheiros[0])
+            self.cfg["ask_mode"] = self.check_ask.get_active()
+            self.cfg["usar_move"] = self.usar_move
+            save_config(self.cfg)
+
+            # 4. Copiar/Mover ficheiros para a pasta da respetiva coleção
+            operacao_verbo = "Movendo" if self.usar_move else "Copiando"
+            self._log(f"🔄 {operacao_verbo} fotos para '{self.pasta_destino}'...")
             os.makedirs(self.pasta_destino, exist_ok=True)
+
+            processed_set = set()
+            total_main_files = sum(len(self.datas[d]) for d in datas_ord)
+            done_main_files = 0
 
             for d in datas_ord:
                 if self.abort:
                     break
-                ev, loc = self.info[d]
-                pasta = f"{d}_{sanitize(ev)}_{sanitize(loc)}"
+                ev_san, loc_san = self.info[d]
+                pasta = f"{d}_{ev_san}_{loc_san}"
                 dir_dest = os.path.join(self.pasta_destino, pasta)
                 os.makedirs(dir_dest, exist_ok=True)
 
+                count_pasta = 0
                 for f in self.datas[d]:
                     if self.abort:
                         break
+                    if f in processed_set:
+                        continue
+
                     try:
                         sidecars = get_sidecars(f)
                         batch = [f] + sidecars
 
                         for file_to_process in batch:
-                            base, ext = os.path.splitext(os.path.basename(file_to_process))
-                            dest = os.path.join(dir_dest, os.path.basename(file_to_process))
+                            if file_to_process in processed_set:
+                                continue
+
+                            nome_ficheiro = os.path.basename(file_to_process)
+                            base, ext = os.path.splitext(nome_ficheiro)
+                            dest = os.path.join(dir_dest, nome_ficheiro)
+
+                            # Se o ficheiro de origem e destino forem exatamente o mesmo, ignorar
+                            if os.path.abspath(file_to_process) == os.path.abspath(dest):
+                                processed_set.add(file_to_process)
+                                if file_to_process == f:
+                                    self.processed += 1
+                                    count_pasta += 1
+                                continue
 
                             if os.path.exists(dest):
                                 i = 1
@@ -513,48 +2115,72 @@ class ChronosArkheApp(Gtk.Window):
                             else:
                                 shutil.copy2(file_to_process, dest)
 
+                            processed_set.add(file_to_process)
                             if file_to_process == f:
                                 self.processed += 1
+                                count_pasta += 1
+                            else:
+                                self.processed_sidecars += 1
 
                     except Exception as e:
                         self.failed += 1
                         self.errors.append(f"{os.path.basename(f)}: {e}")
                         self._log(f"❌ {os.path.basename(f)}: {e}")
 
-                frac = (datas_ord.index(d) + 1) / len(datas_ord)
-                GLib.idle_add(lambda: self.progress.set_fraction(frac))
+                    done_main_files += 1
+                    frac = done_main_files / max(total_main_files, 1)
+                    GLib.idle_add(lambda v=frac: self.progress.set_fraction(v) or False)
 
-            # Salvar config
-            self.cfg["ultima_pasta"] = self.pasta_destino
-            self.cfg["ask_mode"] = self.check_ask.get_active()
-            self.cfg["usar_move"] = self.usar_move
-            save_config(self.cfg)
+                self._log(f"📂 {pasta}/ ← {count_pasta} foto(s)")
 
-            operacao = "movidas" if self.usar_move else "copiadas"
-            msg = f"\n✅ Concluído! {self.processed} foto(s) {operacao}"
+            if self.abort:
+                self._log("🛑 Operação interrompida pelo utilizador.")
+                return
+
+            # 5. Relatório final
+            operacao_part = "movida(s)" if self.usar_move else "copiada(s)"
+            msg = f"✅ Concluído! {self.processed} foto(s) {operacao_part}"
+            if self.processed_sidecars:
+                msg += f" e {self.processed_sidecars} sidecar(s)"
+            msg += f".\n📊 Coleções/Datas distintas: {len(datas_ord)}"
+            msg += (
+                f"\n📐 Fontes EXIF: Pillow={fontes['pillow']}, "
+                f"exifread={fontes['exifread']}, exiftool={fontes['exiftool']}, mtime={fontes['mtime']}"
+            )
+            if fallback_cnt:
+                msg += f"\n⚠️ {fallback_cnt} data(s) com nome padrão (Evento_Local)."
+            if datas_sem_exif:
+                n = len(datas_sem_exif)
+                amostra = ", ".join(datas_sem_exif[:3])
+                sufixo = "..." if n > 3 else ""
+                msg += f"\n⚠️ {n} foto(s) sem EXIF (usaram data de modificação): {amostra}{sufixo}"
             if self.failed:
-                msg += f"\n❌ {self.failed} erro(s)"
-            self._log(msg)
+                msg += f"\n❌ {self.failed} erro(s):\n" + "\n".join(self.errors[:5])
+
+            self._log("\n" + msg)
+            self._run_on_main_thread(self._dialogo_relatorio_final, msg)
 
         except Exception as e:
             self._log(f"❌ ERRO: {e}")
         finally:
-            GLib.idle_add(lambda: self.btn_start.set_sensitive(True))
+            GLib.idle_add(lambda: self.btn_start.set_sensitive(True) or False)
             self.state = "IDLE"
 
-def main():
-    # Processar modo Nautilus (argumentos CLI)
-    ficheiros_iniciais = None
-    if len(sys.argv) > 1 and sys.argv[1] != '--debug':
-        ficheiros_iniciais = []
-        for u in sys.argv[1:]:
-            path = _normalizar_uri(u)
-            if os.path.isfile(path):
-                ficheiros_iniciais.append(path)
 
-    app = ChronosArkheApp(initial_files=ficheiros_iniciais)
+def main():
+    args = list(sys.argv[1:])
+    debug_mode = '--debug' in args
+    if debug_mode:
+        args.remove('--debug')
+        print("🔍 MODO DEBUG ativado — informação detalhada por ficheiro")
+
+    cfg = load_config()
+    ficheiros_iniciais = _expandir_caminhos(args, cfg) if args else None
+
+    app = ChronosArkheApp(initial_files=ficheiros_iniciais, debug_mode=debug_mode)
     app.show_all()
     Gtk.main()
+
 
 if __name__ == "__main__":
     main()

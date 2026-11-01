@@ -11,12 +11,13 @@ DEB_DIR="${BUILD_BASE}/${PKG_NAME}_${VERSION}_${ARCH}"
 
 echo "🔨 A preparar estrutura do pacote .deb..."
 rm -rf "${BUILD_BASE}"
-mkdir -p "${DEB_DIR}/DEBIAN"
-mkdir -p "${DEB_DIR}/usr/bin"
-mkdir -p "${DEB_DIR}/usr/share/applications"
-mkdir -p "${DEB_DIR}/usr/share/icons/hicolor/scalable/apps"
-mkdir -p "${DEB_DIR}/usr/share/nautilus/scripts"
-mkdir -p "${DEB_DIR}/usr/share/doc/${PKG_NAME}"
+install -d -m 755 "${DEB_DIR}/DEBIAN"
+install -d -m 755 "${DEB_DIR}/usr/bin"
+install -d -m 755 "${DEB_DIR}/usr/share/applications"
+install -d -m 755 "${DEB_DIR}/usr/share/icons/hicolor/scalable/apps"
+install -d -m 755 "${DEB_DIR}/usr/share/nautilus/scripts"
+install -d -m 755 "${DEB_DIR}/usr/share/doc/${PKG_NAME}"
+chmod 755 "${BUILD_BASE}" "${DEB_DIR}" "${DEB_DIR}/usr" "${DEB_DIR}/usr/share" "${DEB_DIR}/usr/share/icons" "${DEB_DIR}/usr/share/icons/hicolor" "${DEB_DIR}/usr/share/icons/hicolor/scalable" "${DEB_DIR}/usr/share/nautilus" "${DEB_DIR}/usr/share/doc"
 
 # 1. Ficheiros de controlo Debian
 install -m 644 "${REPO_ROOT}/debian/control" "${DEB_DIR}/DEBIAN/control"
@@ -36,5 +37,6 @@ install -m 644 "${REPO_ROOT}/LICENSE" "${DEB_DIR}/usr/share/doc/${PKG_NAME}/copy
 
 echo "📦 A construir pacote com dpkg-deb..."
 dpkg-deb --build --root-owner-group "${DEB_DIR}"
+rm -rf "${DEB_DIR}"
 
 echo "✅ Pacote gerado com sucesso em: ${BUILD_BASE}/${PKG_NAME}_${VERSION}_${ARCH}.deb"

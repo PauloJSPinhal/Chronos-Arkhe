@@ -16,7 +16,9 @@ Thumbs.db
 *.swp
 *~
 
-# Project specific
+# Build & Packaging
 build/
+*.deb
+
+# Project specific
 test_photos/
-*.backup

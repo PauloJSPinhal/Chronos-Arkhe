@@ -1,8 +1,8 @@
-# Contribuir para o Chronos-Photo-Organizer
+# Contribuir para o Chronos Arkhe
 
 Obrigado pelo interesse em contribuir! 🎉
 
-Este documento descreve como configurar o ambiente, as convenções de código e o processo para submeter alterações.
+Este documento descreve como configurar o ambiente, as convenções de código e o processo para submeter alterações ao **Chronos Arkhe**.
 
 ---
 
@@ -31,47 +31,38 @@ Participa de forma respeitosa e construtiva. Comentários pessoais, ataques ou d
 ### Pré-requisitos
 
 - Python 3.8+
-- GTK 3.36+
-- `pip` e `venv`
+- GTK 3.24+ (`python3-gi`, `gir1.2-gtk-3.0`)
+- Pillow (`python3-pil`)
 
 ### Passo a passo
 
 1. **Fork e clone** do repositório:
 
    ```bash
-   git clone https://github.com/SEU-USUARIO/Chronos-Photo-Organizer.git
-   cd Chronos-Photo-Organizer
+   git clone https://github.com/PauloJSPinhal/Chronos-Arkhe.git
+   cd Chronos-Arkhe
    ```
 
-2. **Criar ambiente virtual**:
+2. **Instalar dependências de sistema e desenvolvimento**:
 
    ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
+   sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 python3-pil python3-exifread libimage-exiftool-perl
+   pip install pytest pytest-cov flake8 black
    ```
 
-3. **Instalar dependências de desenvolvimento**:
+3. **Ativar como Nautilus Script (opcional, para testes reais)**:
 
    ```bash
-   pip install Pillow exifread pytest pytest-cov flake8 black
+   ./scripts/enable-nautilus-script.sh
    ```
 
-   > ⚠️ O `pygobject` é instalado via sistema, não via pip. Em Debian/Ubuntu:
-   > `sudo apt install python3-gi gir1.2-gtk-3.0`
-
-4. **Instalar como Nautilus Script (opcional, para testes reais)**:
+4. **Executar a partir do código-fonte**:
 
    ```bash
-   scripts/enable-nautilus-script.sh
+   ./scripts/run.sh
    ```
 
-5. **Executar a partir do código-fonte**:
-
-   ```bash
-   scripts/run.sh
-   ```
-
-6. **Verificar instalação**:
+5. **Verificar instalação**:
 
    ```bash
    python3 -c "import gi; gi.require_version('Gtk', '3.0'); from gi.repository import Gtk; print('GTK OK')"
@@ -82,13 +73,13 @@ Participa de forma respeitosa e construtiva. Comentários pessoais, ataques ou d
 
 ## 📁 Estrutura do projeto
 
-```
+```text
 Chronos-Arkhe/
 ├── bin/
 │   └── chronos-arkhe            # Aplicação principal (GTK3 + lógica)
 ├── data/
 │   ├── chronos-arkhe.desktop    # Entrada XDG Desktop
-│   └── icons/                   # Ícones hicolor
+│   └── icons/                   # Ícone vetorial hicolor
 ├── debian/                      # Empacotamento Debian
 │   ├── control
 │   ├── postinst
@@ -118,7 +109,7 @@ Chronos-Arkhe/
 ### Estilo geral
 
 - **PEP 8** com `black` para formatação automática
-- **Linhas até 100 caracteres** (não 79 — o script tem strings longas)
+- **Linhas até 100 caracteres**
 - **Indentação**: 4 espaços, sem tabs
 - **Encoding**: UTF-8 com header `# -*- coding: utf-8 -*-`
 
@@ -126,42 +117,38 @@ Chronos-Arkhe/
 
 | Item | Convenção | Exemplo |
 |---|---|---|
-| Nomes de funções/métodos | `snake_case` em PT | `_obter_data_exif()` |
+| Nomes de funções/métodos | `snake_case` em PT | `obter_data_exif()` |
 | Nomes de variáveis | `snake_case` em PT | `historico_eventos` |
 | Constantes | `UPPER_SNAKE` em PT ou EN | `IMAGE_EXTS`, `CONFIG_FILE` |
-| Métodos internos | Prefixo `_` | `_worker()`, `_log()` |
+| Métodos internos | Prefixo `_` | `_worker()`, `_log()`, `_dialogo_por_data()` |
 | Docstrings | Triple-quote duplo | `"""..."""` |
-| Mensagens de UI | PT-PT natural | "Pedir Evento e Local para cada data" |
+| Mensagens de UI | PT-PT natural | `"Pedir Evento e Local para cada data (coleção)"` |
 
 ### Verificar antes de commitar
 
 ```bash
+# Validar sintaxe
+python3 -m py_compile bin/chronos-arkhe
+
 # Formatar
 black bin/chronos-arkhe
 
 # Lint
 flake8 bin/chronos-arkhe --max-line-length=100
-
-# Tipo (se adicionares typing)
-mypy bin/chronos-arkhe --ignore-missing-imports
 ```
 
 ### Arquitetura
 
-A v6.0 segue o padrão da suite Chronos (ver Chronos-Nomos):
+A v6.0 segue o padrão da suite Chronos:
 
 - **Classe principal**: `ChronosArkheApp(Gtk.Window)` encapsula toda a UI e estado
-- **Thread worker**: `_worker()` executa o processamento em background
-- **Atualizações de UI**: sempre via `GLib.idle_add()` a partir da thread
+- **Thread worker**: `_worker()` executa a leitura EXIF e a cópia/movimentação em background
+- **Diálogos e UI**: sempre executados na main thread via `GLib.idle_add()` ou `_run_on_main_thread()`
 - **Configuração**: `~/.config/chronos/arkhe.json` (padrão XDG da suite)
 
 ---
 
 ## 🧪 Testes
-
-### Estado atual
-
-O projeto ainda **não tem suite de testes**. Esta é uma área prioritária para contribuição.
 
 ### Prioridades de teste
 
@@ -169,24 +156,29 @@ O projeto ainda **não tem suite de testes**. Esta é uma área prioritária par
 |---|---|---|
 | Sanitização | `sanitize()` | Alta — lógica central, fácil de testar |
 | EXIF | `obter_data_exif()` | Alta — lógica central |
+| Regras de Origem e Destino | `is_origem_permitida()` / `is_destino_permitido()` / `is_pasta_excluida()` | Alta — segurança de navegação |
+| Expansão de caminhos | `_expandir_caminhos()` | Média |
 | Sidecars | `get_sidecars()` | Média |
-| Histórico | `load_history()` / `save_history()` | Média |
-| UI | Diálogos GTK | Baixa — difícil de automatizar |
+| Configuração/Histórico | `load_config()` / `save_config()` | Média |
 
 ### Exemplo de estrutura de teste
 
+Como o executável `bin/chronos-arkhe` não tem extensão `.py`, importa-se com `SourceFileLoader`:
+
 ```python
 # tests/test_sanitize.py
+import importlib.machinery
 import importlib.util
 import pytest
 
-spec = importlib.util.spec_from_file_location("chronos_arkhe", "bin/chronos-arkhe")
+loader = importlib.machinery.SourceFileLoader("chronos_arkhe", "bin/chronos-arkhe")
+spec = importlib.util.spec_from_loader("chronos_arkhe", loader)
 chronos_arkhe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(chronos_arkhe)
 
 sanitize = chronos_arkhe.sanitize
 
-@pytest.mark.parametrize("input,expected", [
+@pytest.mark.parametrize("entrada,esperado", [
     ("Fim de semana", "Fim-de-semana"),
     ("Trás-os-Montes", "Trás-os-Montes"),
     ("São João!!", "São-João"),
@@ -194,35 +186,19 @@ sanitize = chronos_arkhe.sanitize
     ("-Natal-", "Natal"),
     ("", "Indefinido"),
 ])
-def test_sanitize(input, expected):
-    assert sanitize(input) == expected
-```
-
-> Nota: o binário não tem extensão `.py`, por isso os testes importam-no via `importlib.util.spec_from_file_location`.
-
-### Executar testes
-
-```bash
-pytest tests/ -v
+def test_sanitize(entrada, esperado):
+    assert sanitize(entrada) == esperado
 ```
 
 ---
 
 ## 📝 Commits
 
-### Formato
-
 Seguir [Conventional Commits](https://www.conventionalcommits.org/):
 
-```
+```text
 <tipo>(<scope>): <descrição>
-
-<corpo opcional>
-
-<footer opcional>
 ```
-
-### Tipos
 
 | Tipo | Quando usar |
 |---|---|
@@ -235,103 +211,46 @@ Seguir [Conventional Commits](https://www.conventionalcommits.org/):
 | `test` | Adicionar/corrigir testes |
 | `chore` | Tarefas de manutenção |
 
-### Exemplos
-
-```bash
-git commit -m "feat(exif): adicionar fallback para exifread em RAWs"
-git commit -m "fix(sanitize): preservar underscores em nomes de eventos"
-git commit -m "docs(readme): adicionar secção de formatos RAW suportados"
-git commit -m "refactor(history): usar escrita atómica via os.replace"
-```
-
 ---
 
 ## 🔄 Pull Requests
 
 ### Antes de submeter
 
-- [ ] Código formatado com `black`
-- [ ] `flake8` sem warnings
-- [ ] Testes adicionados para nova funcionalidade
-- [ ] Todos os testes a passar
-- [ ] `CHANGELOG.md` atualizado em [Unreleased]
+- [ ] `python3 -m py_compile bin/chronos-arkhe` sem erros
+- [ ] Testes funcionais verificados
+- [ ] `CHANGELOG.md` atualizado
 - [ ] Commits seguem Conventional Commits
-
-### Processo
-
-1. **Criar branch** a partir de `main`:
-
-   ```bash
-   git checkout -b feat/minha-funcionalidade
-   ```
-
-2. **Fazer commits pequenos e atómicos** — cada commit deve deixar o código funcional.
-
-3. **Push e abrir PR**:
-
-   ```bash
-   git push origin feat/minha-funcionalidade
-   ```
-
-4. **No PR, descrever**:
-   - O que muda e porquê
-   - Como testar manualmente
-   - Screenshots (se alterar UI)
-   - Issues fechadas (`Closes #123`)
-
-### Critérios de aceitação
-
-- ✅ Mantém o espírito do projeto: **simples, sem dependências pesadas**
-- ✅ Não quebra compatibilidade com versões anteriores (a menos que seja major)
-- ✅ Código em PT-PT coerente com o resto do script
-- ✅ Não introduz dependências desnecessárias (cada nova dep precisa de justificação)
 
 ---
 
 ## 🐛 Reportar bugs
 
-Usar o template [bug-report.md](./.github/ISSUE_TEMPLATE/bug-report.md).
+Ao abrir uma issue, inclui:
 
-Informações essenciais:
-
-- Versão do Chronos Arkhe (ver `CHANGELOG.md` ou o cabeçalho de `bin/chronos-arkhe`)
+- Versão do Chronos Arkhe (ver `CHANGELOG.md` ou cabeçalho de `bin/chronos-arkhe`)
 - Distribuição Linux e versão do GNOME
-- Versão do Python e do PyGObject
+- Versão do Python, Pillow e PyGObject
 - Formato dos ficheiros envolvidos (JPEG, CR3, NEF, ...)
-- Passos para reproduzir
-- Output de erro (se houver)
-
-Executar em modo debug para recolher informação útil:
+- Output em modo debug:
 
 ```bash
-GTK_DEBUG=all scripts/run.sh foto.jpg 2>&1 | tee debug.log
+./scripts/run.sh --debug foto.jpg 2>&1 | tee debug.log
 ```
 
 ---
 
 ## 💡 Propor funcionalidades
 
-Usar o template [feature-request.md](./.github/ISSUE_TEMPLATE/feature-request.md).
-
 Antes de abrir uma issue de funcionalidade, verificar:
 
-- [ ] A funcionalidade está alinhada com o objetivo do projeto (organização de fotos por data)
+- [ ] A funcionalidade está alinhada com o objetivo do projeto (organização de fotos por coleção/data)
 - [ ] Não existe já uma issue aberta para o mesmo tema
-- [ ] A funcionalidade não pode ser resolvida com ferramentas externas (ex.: `exiftool`)
-
-### Áreas onde contribuições são especialmente bem-vindas
-
-- 🧪 **Testes automatizados** — qualquer cobertura é valiosa
-- 🌍 **Internacionalização** — extrair strings para `.po`/`.mo`
-- ⚡ **Performance** — thumbnails assíncronos, leitura EXIF paralela
-- 📦 **Empacotamento** — pacotes `.deb`, `.rpm`, AUR
-- 🪟 **Porting Windows** — usando PyGObject + MSYS2 (experimental)
 
 ---
 
 ## ❓ Dúvidas
 
-- Abrir uma [issue](https://github.com/Chronos-Photo-Organizer/issues) com a label `question`
-- Ou contactar via discussões do GitHub (se ativadas)
+- Abrir uma [issue](https://github.com/PauloJSPinhal/Chronos-Arkhe/issues) no GitHub.
 
 Obrigado por contribuir! 🚀

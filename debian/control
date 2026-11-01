@@ -4,11 +4,10 @@ Section: graphics
 Priority: optional
 Architecture: all
 Maintainer: Paulo Pinhal <paulo@localhost>
-Depends: python3, python3-gi, gir1.2-gtk-3.0
-Recommends: libimage-exiftool-perl
-Suggests: python3-pil
+Depends: python3, python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, python3-pil
+Recommends: python3-exifread, libimage-exiftool-perl
 Description: Organizador cronologico de fotografias por data EXIF
  Aplicacao nativa GTK3 e script de contexto para o Nautilus concebida
- para a organizacao segura de acervos fotograficos por data de captura,
- com suporte a modo copia/movimento, preview de miniaturas, e logging
- em tempo real.
+ para a organizacao segura de acervos fotograficos em colecoes por data
+ de captura (AAAAMMDD_Evento_Local), com suporte a modo copia/movimento,
+ pre-visualizacao de miniaturas, historico inteligente e logging em tempo real.

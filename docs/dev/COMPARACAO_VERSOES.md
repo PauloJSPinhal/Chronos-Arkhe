@@ -146,13 +146,13 @@ Interatividade: ✅ Fluída
 
 ## Compatibilidade Regressiva
 
-✅ **100% compatível** (exceto local de configuração)
+✅ **100% compatível** (com migração automática do histórico legado)
 
 ```bash
 # Ainda funciona
 chronos-arkhe ~/Fotos/*.jpg           # CLI
 chronos-arkhe file:///home/user/...  # Nautilus
-chronos-arkhe --debug ~/Fotos/*.jpg  # Debug (simplificado)
+chronos-arkhe --debug ~/Fotos/*.jpg  # Debug EXIF detalhado
 ```
 
 ## Performance

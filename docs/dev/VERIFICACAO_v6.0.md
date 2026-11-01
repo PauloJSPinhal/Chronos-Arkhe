@@ -8,9 +8,11 @@
 - [x] Executa como aplicação independente (`chronos-arkhe`)
 - [x] Registada no menu de aplicações (.desktop)
 
-### 2. Navegador de Ficheiros
-- [x] FileChooserWidget integrado na janela principal
-- [x] Seleção múltipla de fotos
+### 2. Navegador de Ficheiros e Controlo de Origens/Destino
+- [x] `OrigensFileBrowser` integrado na janela principal (oculta pastas proibidas em `pastas_excluidas`)
+- [x] Origens permitidas: `~/Imagens`, `~/Transferências` (e subpastas), Pendrives, Cartões SD e Câmaras USB (`Gio.VolumeMonitor`)
+- [x] Pasta de Destino restrita a `~/Imagens` e respetivas subpastas (`is_destino_permitido`)
+- [x] Seleção múltipla de fotos e pastas
 - [x] Filtro automático para imagens/RAWs
 - [x] Preview de miniaturas em tempo real
 - [x] Lista de ficheiros selecionados no painel lateral

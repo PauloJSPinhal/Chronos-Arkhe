@@ -183,9 +183,8 @@ O novo ficheiro `debian/control` especifica:
 Package: chronos-arkhe
 Version: 6.0.0
 Architecture: all
-Depends: python3, python3-gi, gir1.2-gtk-3.0
-Recommends: libimage-exiftool-perl
-Suggests: python3-pil
+Depends: python3, python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, python3-pil
+Recommends: python3-exifread, libimage-exiftool-perl
 ```
 
 ---

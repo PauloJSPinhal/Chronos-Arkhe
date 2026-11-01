@@ -11,14 +11,15 @@ if ! python3 -c "import gi; gi.require_version('Gtk', '3.0')" >/dev/null 2>&1; t
     exit 1
 fi
 
-# Verificar Pillow (opcional mas recomendado para preview)
-if ! python3 -c "import PIL" >/dev/null 2>&1; then
-    echo "⚠️  Aviso: Pillow não encontrada. Preview de miniaturas desativado. Instala com: pip install Pillow" >&2
+# Verificar Pillow (essencial para leitura EXIF primária e miniaturas)
+if ! python3 -c "from PIL import Image" >/dev/null 2>&1; then
+    echo "❌ Erro: Biblioteca Pillow em falta. Instala com: sudo apt install python3-pil (ou pip install Pillow)" >&2
+    exit 1
 fi
 
-# Verificar exifread (opcional)
+# Verificar exifread (opcional — fallback para RAWs)
 if ! python3 -c "import exifread" >/dev/null 2>&1; then
-    echo "⚠️  Aviso: exifread não encontrada. Leitura de EXIF simplificada. Instala com: pip install exifread" >&2
+    echo "⚠️  Aviso: exifread não encontrada. Para melhor suporte RAW instala com: sudo apt install python3-exifread (ou pip install exifread)" >&2
 fi
 
 # 2. Garantir permissões de execução no binário

@@ -101,24 +101,19 @@ bin/chronos-arkhe
 
 | Feature | v5.5 | v6.0 | Nota |
 |---------|------|------|------|
-| Modo Nautilus | ✅ | ✅ | Funções iguais |
+| Modo Nautilus | ✅ | ✅ | Aceita ficheiros e pastas |
 | Modo CLI | ✅ | ✅ | Argumentos processados |
-| Flag --debug | ✅ | ❓ | (Simplificado por enquanto) |
-| Histórico | ⚠️ | ✅ | Migrado para ~/.config/chronos/ |
-| UI Interface | ✅ | ✅ | Idêntica visualmente |
+| Flag --debug | ✅ | ✅ | Diagnóstico EXIF completo |
+| Histórico | ⚠️ | ✅ | Migrado automaticamente para `~/.config/chronos/arkhe.json` |
+| UI Interface | ✅ | ✅ | Navegador integrado + diálogo por data com preview |
 | Toggle Copiar/Mover | ✅ | ✅ | Mantido |
 
 ## Migração de Configuração
 
 Quando o utilizador abrir a app pela primeira vez:
 1. App procura `~/.config/chronos/arkhe.json`
-2. Se não existe, cria com padrões
-3. Histórico antigo em `~/.config/organizar_fotos/` é ignorado
-
-**Para migrar dados manualmente:**
-```bash
-cp ~/.config/organizar_fotos/historico.json ~/.config/chronos/arkhe.json
-```
+2. Se existir `~/.config/organizar_fotos/historico.json` (versões 5.x), importa automaticamente os `eventos`, `locais` e `ultima_pasta`
+3. Grava de forma atómica em `~/.config/chronos/arkhe.json`
 
 ## Vantagens do Novo Padrão
 
@@ -145,12 +140,17 @@ cp ~/.config/organizar_fotos/historico.json ~/.config/chronos/arkhe.json
 
 ### Programático
 ```python
-from bin.chronos-arkhe import ChronosArkheApp
-import Gtk
+import importlib.machinery
+import importlib.util
 
-app = ChronosArkheApp(initial_files=["~/Fotos/img1.jpg", "~/Fotos/img2.jpg"])
+loader = importlib.machinery.SourceFileLoader("chronos_arkhe", "bin/chronos-arkhe")
+spec = importlib.util.spec_from_loader("chronos_arkhe", loader)
+chronos_arkhe = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(chronos_arkhe)
+
+app = chronos_arkhe.ChronosArkheApp(initial_files=["~/Fotos/img1.jpg", "~/Fotos/img2.jpg"])
 app.show_all()
-Gtk.main()
+chronos_arkhe.Gtk.main()
 ```
 
 ### Modo Nautilus (automático)
@@ -164,14 +164,16 @@ chronos-arkhe file:///home/user/Fotos/img1.jpg file:///home/user/Fotos/img2.jpg
 chronos-arkhe ~/Fotos/*.jpg
 ```
 
-## Próximas Melhorias
+## Melhorias Implementadas e Futuras
 
-Com esta base, é fácil adicionar:
-- [ ] Diálogo por data em thread (não bloqueia)
-- [ ] Botão Abort/Cancelar funcional
-- [ ] Preview do resultado (antes de confirmar)
-- [ ] Historicização de operações (log persistente)
-- [ ] Undo/Redo
+- [x] Diálogo por data sincronizado com a main thread (`_run_on_main_thread` + `_dialogo_por_data`)
+- [x] Navegador filtrado `OrigensFileBrowser` (`~/Imagens`, `~/Transferências`, Pendrives, Cartões SD e Câmara USB) sem exibir pastas proibidas
+- [x] Restrição da Pasta de Destino exclusivamente a `~/Imagens` e respetivas subpastas (`is_destino_permitido`)
+- [x] Gestão gráfica de `origens_permitidas` e `pastas_excluidas` em `~/.config/chronos/arkhe.json`
+- [x] Botão Abort/Cancelar funcional
+- [x] Preview em tempo real do nome da pasta e navegação pelas fotos da coleção
+- [ ] Gestão de histórico pela interface (remover entradas antigas)
+- [ ] Undo/Redo de operações
 
 ## Testes Recomendados
 
